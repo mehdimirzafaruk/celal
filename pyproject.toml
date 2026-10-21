@@ -1,0 +1,33 @@
+[project]
+name = "jarvis"
+version = "0.1.0"
+description = "Vera: yerel, Türkçe sesli asistan (Pipecat + Whisper MLX + Claude Agent SDK + EMA Lightning)"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Mehdi Mirza Parmaksız", email = "78604694+mehdimirzafaruk@users.noreply.github.com" }
+]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "claude-agent-sdk>=0.2.170",
+    "ema-lightning>=1.1.2",
+    "pipecat-ai[mlx-whisper,whisper]>=1.13,<1.14",
+    "sounddevice>=0.5.6",
+]
+
+[project.scripts]
+jarvis = "jarvis.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
