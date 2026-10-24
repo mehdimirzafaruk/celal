@@ -217,7 +217,7 @@
     $("conn-text").textContent = "Hermes " + s.conn;
     const st = $("state"); st.className = "pill " + (STATE_CLASS[s.state] || "");
     $("state-text").textContent = s.state;
-    $("reason").textContent = "Hermes: " + s.reason + "  ·  tünel: " + s.tunnel + (s.mac ? "  ·  Mac API: " + s.mac.api : "");
+    $("reason").textContent = "Hermes: " + s.reason + "  ·  tünel: " + s.tunnel + (s.mac ? "  ·  Mac API: " + s.mac.api + " (ters tünel: " + s.mac.reverse + ")" : "");
     micOn = !!s.mic; const mic = $("mic");
     if (s.wake) wake = s.wake;
     const passive = micOn && wake.on && !wake.active;
@@ -231,7 +231,7 @@
       if (s.active && s.active !== activeId) showPane(s.active);
       renderTabs();
       const kind = tabOf(s.active).kind;
-      $("input").placeholder = kind === "hermes" ? "Hermes'e: “sunucuda …” ile başla (ön eksiz mesaj Mac sekmesine gider)" : "Celal'e yaz… (Mac'te Claude Code; “sunucuda …” Hermes'e gider)";
+      $("input").placeholder = kind === "hermes" ? "Hermes'e: “sunucuda …” ile başla (ön eksiz mesaj Mac sekmesine gider)" : "Celal'e yaz… (Mac'te Claude; “sunucuda …” → Hermes)";
     }
     const m = s.mac || {};
     const par = $("par");

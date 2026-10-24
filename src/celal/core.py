@@ -487,7 +487,7 @@ class CelalCore:
             parts.append("ses kesildi")
         if result.get("dropped"):
             parts.append(f"sıradaki {result['dropped']} mesaj iptal")
-        text = ("Durduruldu: " + ", ".join(parts) + ".") if parts else "Durduracak bir şey yoktu."
+        text = ("Durdur: " + ", ".join(parts) + ".") if parts else "Durduracak bir şey yoktu."
         text = text[0].upper() + text[1:]
         result["text"] = text
         self.emit({"type": "stopped", "tab_id": tab_id, "text": text})

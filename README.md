@@ -1,14 +1,20 @@
-# Celal: Hermes'e bağlanan Türkçe sesli asistan (Mac)
+# Celal: Mac'te çalışan Türkçe sesli asistan
 
-Celal, Mac'te kendi penceresinde açılan sesli asistandır. Beyni sunucudaki
-[Hermes](https://github.com/NousResearch/hermes-agent) ajanıdır; ses tarafı tamamen yereldir.
-Yazarsın ya da konuşursun, Celal Hermes'e sorar, cevabı ekranda gösterir ve Türkçe sesle okur.
+Celal, Mac'te kendi penceresinde açılan sesli asistandır. Yazarsın ya da konuşursun; mesaj
+**önce Mac'te**, Mac'teki Claude Code'da çalışır (kendi skill'lerin, hook'ların, MCP'lerin,
+CLAUDE.md'n ile). Yalnız gerçekten sunucuda yapılması gereken iş sunucudaki
+[Hermes](https://github.com/NousResearch/hermes-agent) ajanına gider. Ses tarafı tamamen yereldir.
 
 ```
-mikrofon → Silero VAD + Smart Turn v3 → Whisper large-v3-turbo MLX (tr)
-        → SSH tüneli → Hermes API (/v1/responses, akış) → EMA Lightning (tr) / say -v Yelda → hoparlör
-"Mac'te …"  → Mac'teki Claude Code (claude -p) → sonuç pencerede, ilk iki cümle sesli
-Hermes mac_task → ssh -R → Celal'in yerel API'si (127.0.0.1:8643) → aynı Mac görevi
+mikrofon → Silero VAD + Smart Turn v3 → Whisper large-v3-turbo MLX (tr) ┐
+yazı ────────────────────────────────────────────────────────────────────┤
+                                                                         ▼
+                 aktif sekme → Mac'teki Claude Code (Agent SDK, sekme başına kalıcı oturum)
+                                 └─ sunucu işi gerekirse: celal hermes "<istek>" → Hermes
+                 "sunucuda …" → Hermes API (SSH tüneli, /v1/responses, akış)
+                                                                         ▼
+                               EMA Lightning (tr) / say -v Yelda → hoparlör (yalnız aktif sekme)
+Hermes (Telegram) mac_task → ssh -R → Celal'in yerel API'si (127.0.0.1:8643) → yeni 📱 sekme
 ```
 
 **Kulaklık gerekmez.** Celal konuşurken (ve son sesten sonraki ~400 ms boyunca) mikrofon
@@ -78,11 +84,13 @@ api = "responses"        # sohbet sunucuda tutulur; "chat" = /v1/chat/completion
 [ui]
 hotkey = "ctrl+space"    # mikrofon aç/kapat; "off" kapatır
 
-[mac]                    # "Mac'te yap" (hepsi isteğe bağlı, değerler varsayılan)
-prefixes = ["Mac'te", "Mac'de", "Macte", "bilgisayarda"]
-cwd = "~"                # görevlerin çalışma klasörü
+[mac]                    # varsayılan beyin: Mac'teki Claude Code (hepsi isteğe bağlı, değerler varsayılan)
+model = "sonnet"         # hız için; "opus" da yazılabilir
+cwd = "~"                # yeni sekmelerin çalışma klasörü
 claude = "claude"        # ya da tam yol; PATH'e ek olarak ~/.local/bin aranır
-timeout = 1800           # saniye
+timeout = 1800           # bir cevap için en çok saniye
+idle_close = 600         # boşta kalan Claude süreci kapanır, oturum saklanır
+max_parallel = 3         # aynı anda en çok kaç sekme çalışır (pencere + Hermes ortak)
 api = true               # Hermes → Mac yerel API'si ve ters tünel
 api_port = 8643
 ```
@@ -102,16 +110,20 @@ yeniden kurar, istekler takılırsa tüneli öldürüp yeniden başlatır. Port 
 
 Ortam değişkenleri dosyayı ezer: `CELAL_SSH_HOST`, `CELAL_SSH_KEY`, `CELAL_PORT`,
 `CELAL_REMOTE_PORT`, `CELAL_CONVERSATION`, `CELAL_API`, `CELAL_API_KEY_FILE`,
-`CELAL_HOTKEY`, `CELAL_MODELS_DIR`, `CELAL_CONFIG`, `CELAL_MAC_PREFIXES` (virgüllü),
-`CELAL_MAC_CWD`, `CELAL_CLAUDE`, `CELAL_MAC_TIMEOUT`, `CELAL_MAC_API` (0/1), `CELAL_MAC_PORT`,
-`CELAL_MAC_API_KEY_FILE`.
+`CELAL_HOTKEY`, `CELAL_MODELS_DIR`, `CELAL_CONFIG`, `CELAL_HERMES_PREFIXES` (virgüllü),
+`CELAL_MAC_MODEL`, `CELAL_MAC_CWD`, `CELAL_CLAUDE`, `CELAL_MAC_TIMEOUT`, `CELAL_MAC_IDLE_CLOSE`,
+`CELAL_MAC_MAX_PARALLEL`, `CELAL_MAC_WARM` (0/1), `CELAL_MAC_API` (0/1), `CELAL_MAC_PORT`,
+`CELAL_MAC_API_KEY_FILE`, `CELAL_STATE_DIR` (`tabs.json`, `tasks.json`; varsayılan `~/.config/celal`).
 
-### 2b. Mac'te yap (isteğe bağlı)
+### 2b. Mac'teki Claude Code ve Hermes → Mac
 
-Mac'te giriş yapılmış Claude Code gerekir (`claude` komutu; Max aboneliğiyle giriş). Celal
-görevi `claude -p "<görev>" --output-format stream-json --verbose --dangerously-skip-permissions`
-ile çalıştırır; `~/.claude` altındaki skill ve hook'ların hepsi devrededir. Celal'in kendi
-ortamındaki `CLAUDE_*` / `ANTHROPIC_*` değişkenleri alt sürece geçmez (API faturası değil, Max girişi kullanılır).
+Mac'te giriş yapılmış Claude Code gerekir (`claude` komutu; Max aboneliğiyle giriş). Celal onu
+[Claude Agent SDK](https://pypi.org/project/claude-agent-sdk/) ile sekme başına bir `ClaudeSDKClient`
+olarak açar: `permission_mode="bypassPermissions"`, `include_partial_messages=True`, `setting_sources`
+verilmez (yani `~/.claude` altındaki ayar, skill, hook, MCP ve CLAUDE.md'lerin hepsi yüklenir), sistem
+istemine Türkçe kısa sesli cevap kuralı ve "sunucu işi için `celal hermes`" kuralı eklenir. Celal açılırken
+kendi ortamındaki `CLAUDE*` / `ANTHROPIC_*` değişkenlerini siler (`CLAUDE_CODE_OAUTH_TOKEN` hariç):
+alt süreç başka bir Claude oturumunun içinde sanmasın, API faturası değil Max girişi kullanılsın.
 
 Hermes'in de Mac'e iş verebilmesi için (Hermes → Mac):
 
@@ -120,13 +132,10 @@ Hermes'in de Mac'e iş verebilmesi için (Hermes → Mac):
    ```bash
    ssh -i ~/.ssh/sunucu_anahtari kullanici@sunucu-adresi 'umask 077; mkdir -p ~/.config/celal; cat > ~/.config/celal/mac-api-key' < ~/.config/celal/mac-api-key
    ```
-2. Sunucudaki Hermes'te `celal-tools` eklentisi `mac_task` / `mac_task_status` araçlarını sunar;
-   `http://127.0.0.1:8643` adresini bu anahtarla çağırır.
+2. Sunucudaki Hermes'te `celal-tools` eklentisi `http://127.0.0.1:8643` adresini bu anahtarla çağırır
+   (aşağıda "Hermes → Mac API").
 3. Celal ayrı bir `ssh -N -R 127.0.0.1:8643:127.0.0.1:8643` süreci açar. SSH anahtarı
-   `authorized_keys`'te `permitlisten` ile kısıtlıysa listeye `permitlisten="127.0.0.1:8643"` eklenmeli,
-   yoksa sunucu dinlemeye izin vermez (Celal durumda "izin vermedi" yazar). Ters tünel ayrı süreçtir:
-   kopsa da Mac → Hermes sohbeti çalışmaya devam eder. Mac uykudan dönünce sunucu eski oturumda
-   portu tutuyorsa Celal o eski sshd oturumunu bir kez kapatıp yeniden dener.
+   `authorized_keys`'te `permitlisten` ile kısıtlıysa listeye `permitlisten="127.0.0.1:8643"` eklenmeli.
 
 ### 3. İzinler
 
@@ -150,19 +159,19 @@ uv run celal --bench              # Whisper / TTS / RAM ölçümü
 
 Pencere:
 
-- Üstte sunucu durumu (**bağlı** / **bağlı değil**, sebebi ve tünel durumu) ve Celal'in hâli:
-  **hazır / dinliyor / düşünüyor / konuşuyor**. Hermes ilk kelimeye kadar 5–15 s düşünebilir;
-  cevap akarken cümle cümle okunur.
-- **Dinle**: mikrofonu açar/kapatır (ctrl+space da aynı işi yapar).
-- **■ Durdur** (ya da Esc): konuşmayı keser ve sunucudaki isteği iptal eder.
-- **Yeni sohbet**: sunucuda yeni bir sohbet adı açar.
-- **Mac'te çalıştır** (aç/kapa): açıkken her mesaj Hermes yerine Mac'teki Claude Code'a gider.
-  Kapalıyken de `Mac'te …`, `bilgisayarda …` ile başlayan yazılı ya da sesli mesajlar Mac'te çalışır.
-- Sunucu erişilemezse pencere "bağlı değil" gösterir, mesaj gönderilmez, uygulama çökmez;
-  tünel dönünce kendiliğinden "bağlı"ya geçer.
+- Üstte Hermes bağlantısı (**Hermes bağlı** / **bağlı değil**) ve Celal'in hâli:
+  **hazır / bekliyor / dinliyor / düşünüyor / konuşuyor**. Hermes bağlı değilken de Mac işleri çalışır.
+- **Sekme şeridi**: her sekme bir görev/konuşma (bir Claude oturumu). Etiket görevin ilk kelimeleri;
+  durum işareti: dönen halka çalışıyor, `…` sırada, ✓ bitti, `!` hata, ■ durduruldu; 📱 Hermes'ten geldi;
+  mavi nokta okunmamış sonuç. **+ Yeni** yeni sekme açar; sağ tık ya da × kapatır (çalışıyorsa önce durdurur).
+- **■ Durdur** (ya da Esc): aktif sekmedeki Mac görevini keser ve sesi susturur. Düğme hemen
+  "durduruluyor…" olur, sekmede "durduruluyor" yazar, bitince "Durdur: Mac görevi durduruldu, ses kesildi."
+  notu çıkar. Sunucuya gönderilmiş işlere (Hermes sekmeleri, `celal hermes`, Telegram'dan başlayan sunucu
+  görevleri) iptal göndermez; onlarda yalnız ses kesilir. 📱 sekmeler Mac'te koştuğu için Durdur onları durdurur.
+- Alt satırda `2/3 çalışıyor · 1 sırada` gibi paralel iş sayısı.
 
 Menü çubuğu (`● Celal` bağlı, `○ Celal` bağlı değil, `⏺` dinliyor): pencereyi göster/gizle,
-mikrofon aç/kapat, Durdur, **Çıkış**. Çıkış tüneli kapatır ve uygulamayı temiz kapatır.
+mikrofon aç/kapat, Durdur (aktif sekme), **Çıkış**. Çıkış tüneli kapatır ve uygulamayı temiz kapatır.
 Pencerenin kapat düğmesi pencereyi gizler (menüden geri açılır). Terminalde Ctrl-C da
 (pencere ve `--text` modunda) tüneli kapatıp çıkar.
 
@@ -170,7 +179,7 @@ Bayraklar:
 
 | Bayrak | Anlamı |
 |---|---|
-| `--text` | terminal modu (stdin'den yazı) |
+| `--text` | terminal modu (stdin'den yazı; her satır aktif sekmeye) |
 | `--mic` | mikrofon açık başlasın |
 | `--barge-in` | Celal konuşurken araya girince sussun (kulaklık gerekir) |
 | `--min-words N` | `--barge-in` ile: N kelimeden sonra sus (0: sesini duyunca) |
@@ -182,97 +191,134 @@ Bayraklar:
 | `--timeout N` | `--text`: cevap için en çok N saniye (varsayılan 300) |
 | `--log debug\|info\|warning` | log seviyesi |
 
-## Mac'te yap
+## Yönlendirme: önce Mac
+
+| Mesaj | Nereye |
+|---|---|
+| ön eksiz (yazılı ya da sesli) | aktif sekmenin Mac'teki Claude Code'u; aktif sekme Hermes sekmesiyse en son boştaki Mac sekmesi ya da yeni sekme |
+| `sunucuda …`, `Hermes'e sor …` | doğrudan Hermes (Hermes sekmesi açılır ya da kullanılır) |
+| `yeni görev …` | yeni sekme |
+| eski `Mac'te …` ön eki | Mac (ön ek atılır) |
+
+Mac'teki Claude sunucu işini kendisi devreder: Hermes cron'ları, Yasomi içerik hattı, sunucudaki servisler,
+Telegram'a mesaj gibi işlerde `celal hermes "<istek>"` çalıştırır (sunucuya SSH gerekiyorsa hermes-server
+skill'ini kullanır). Mac'te yapılabilecek iş sunucuya gönderilmez.
 
 ```bash
-echo "Mac'te ~/Kod/celal içindeki testleri çalıştır ve kaç test geçtiğini söyle" | uv run celal --text --tts say --no-play
+echo "bu klasörde kaç dosya var" | CELAL_MAC_CWD=~/Kod/celal uv run celal --text --tts say --no-play
 ```
 
 ```
-[mac] Celal'den görev başladı (/Users/…/Kod/celal): ~/Kod/celal içindeki testleri çalıştır …
-[mac] Claude başladı (…, /Users/…/Kod/celal)…
-[mac] komut çalıştırıyor: .venv/bin/pytest -q 2>&1 | tail -30…
-[mac] bitti: done, 25.1 s
-[mac sonuç]
-40 testin 40'ı geçti, hata yok. …
-[mac özet, sesli] 40 testin 40'ı geçti, hata yok. Süre 12 saniye.
+[sen] bu klasörde kaç dosya var
+[mac] sekme “bu klasörde kaç dosya” (/Users/…/Kod/celal)
+[mac] Claude hazır (claude-sonnet-…)…
+[mac] komut çalıştırıyor: find . -maxdepth 1 -type f | wc -l…
+[celal] Bu klasörde 54 dosya var; .git ve .venv saymadım.
+⏱ ilk kelime 3.6 s, ilk ses 4.7 s, tam cevap 3.6 s
 ```
 
-- Tetik: mesaj `Mac'te` / `mac'te` / `bilgisayarda` ile başlar (`[mac] prefixes`), ya da pencerede
-  **Mac'te çalıştır** açıktır. `Mac'te ~/Kod/x içinde …` (ya da `içindeki`, `klasöründe`, `reposunda`)
-  çalışma klasörünü değiştirir; klasör yoksa varsayılan (`[mac] cwd`, ev klasörü) kullanılır.
-- Claude'un araç adımları pencerede kısa satırlar olarak akar ("dosya okuyor: core.py",
-  "komut çalıştırıyor: pytest"). Bitince tam sonuç pencerede görünür, ilk iki cümlesi sesli okunur
-  (yerelde kesilir, ikinci bir model çağrısı yok).
-- Aynı anda en çok 3 Mac işi çalışır (`[mac] max_parallel`, `CELAL_MAC_MAX_PARALLEL`); her işin kendi
-  `task_id`'si, süreci, adım satırları ve sonucu vardır, birinin bitmesi ya da durması ötekini etkilemez.
-  Sınır dolunca yeni istek "Mac'te aynı anda çalışan iş sınırı doldu" alır (API: 409, `running_task_ids`).
-- Her iş `access` taşır: `read` (ekran görüntüsü, listeleme, soru) ya da `write` (varsayılan: dosya
-  değiştirebilir). Aynı çalışma klasöründe ikinci bir `write` işi reddedilir (API: 409,
-  `conflict_task_id`; pencerede "aynı klasörde değişiklik yapan bir Mac işi zaten çalışıyor"), iki
-  Claude aynı ağacı aynı anda düzenlemesin diye. `read` işler hiç çakışmaz; farklı klasörlerdeki
-  `write` işler yan yana çalışır. Pencereden gelen "Mac'te …" istekleri `write` sayılır.
-- **Durdur** (Esc, menüdeki Durdur) çalışan bütün `claude` süreçlerini ve başlattıkları her şeyi (süreç
-  grupları) öldürür; API tarafında `MacTaskRunner.stop(task_id)` tek işi durdurur.
-- Hermes'ten gelen işler (Telegram ya da Celal sohbeti üzerinden `mac_task`) pencerede
-  "Hermes Mac'te iş başlattı" diye görünür; sonucu Hermes iletir, Mac sesli okumaz.
-  Celal kapalıysa Hermes "Mac bağlı değil (Celal açık değil)" cevabını alır.
+Ölçüm (24 Ekim 2026, M2, `say` TTS; EMA ilk sesi ~1 s daha erken verir): Mac'te "merhaba" ilk ses 2,6 s,
+"bu klasörde kaç dosya var" 4,7 s, aynı sekmede takip sorusu 3,2 s (süreç yeniden açılmaz). Aynı makinede
+Hermes yolu ("sunucuda merhaba") 10,5 s; eski Hermes-varsayılan sürüm 7–15 s.
 
-**Güvenlik:** Mac görevleri izin sormadan çalışır (`--dangerously-skip-permissions`): Claude Mac'te
-dosya silebilir, komut çalıştırabilir. Bu yola yalnız iki giriş var: Celal penceresi/terminali ve
-Hermes. Hermes'e yalnız Mirza'nın Telegram'ı ve Celal ulaşır (API sunucuda yalnız 127.0.0.1'de);
-yerel API yalnız 127.0.0.1'de dinler ve her istekte `mac-api-key` bearer anahtarını ister
-(sabit zamanlı karşılaştırma). Anahtar hiçbir yere loglanmaz. Bu zinciri genişletme (Hermes'e
-başka kanal açma, API'yi dış ağa açma) Mac'i de açar.
+## Sekmeler ve paralel görevler
+
+- Her sekmenin kendi Claude oturumu (`ClaudeSDKClient`) ve kuyruğu vardır. Sekme meşgulken yazılan mesaj
+  o sekmenin sırasına girer ("sırada"), cevap bitince aynı oturuma gider.
+- Aynı anda en çok `max_parallel` (3) sekme çalışır; fazlası "sırada" bekler. Sınır pencere ve Hermes'ten
+  gelen işler için ortaktır.
+- Yalnız **aktif sekmenin** cevabı sesli okunur, cümle cümle, akarken (en çok ~700 karakter, sonra
+  "Devamı ekranda."). Arka plandaki sekme bitince tek cümle okunur ("README görevi bitti") ve sekmeye
+  okunmamış noktası gelir. Hermes'ten gelen 📱 sekmeler bitince ses çıkarmaz (sonucu Hermes iletir).
+  İlerleme satırları ("dosya okuyor…", "komut çalıştırıyor: pytest") sekmede görünür, okunmaz.
+- Claude bir komutu arka plana atarsa (ör. uzun `sleep`), Celal o iş bitip Claude raporlayana kadar sekmeyi
+  "çalışıyor" tutar; Durdur arka plandaki işi de öldürür (Claude süreci kapanır, oturum saklanır).
+- 10 dk boşta kalan Claude süreci kapanır; `session_id` saklanır, sonraki mesaj `resume` ile aynı sohbete döner.
+- Sekmeler kalıcıdır: `~/.config/celal/tabs.json` (etiket, session_id, cwd, son durum, son 50 satır).
+  Celal açılınca geri gelir; açılışta aktif sekmenin Claude'u önceden başlatılır (ilk mesaj daha hızlı).
+
+## Hermes → Mac API
+
+127.0.0.1:8643, her istekte `Authorization: Bearer <mac-api-key>`. Hiçbir uç beklemez.
+
+```
+POST /task              {"task", "cwd"?, "source"?, "label"?}
+                        → 202 {"task_id", "tab_id", "status": "running"|"queued", "queued": bool, "cwd", "label"}
+GET  /task/<id>         → {"status": queued|running|done|error|cancelled, "result", "error",
+                           "started_at", "finished_at", "progress": [...], ...}
+POST /task/<id>/cancel  → {"cancelled": bool}
+GET  /tasks             → {"tasks": [çalışan / sıradaki sekmeler], "running", "queued", "max_parallel"}
+GET  /health            → {"ok": true, "busy", "running", "queued", "max_parallel"}
+```
+
+Her görev pencerede yeni bir 📱 sekmede, pencereden yazılmış gibi Mac'teki Claude'da koşar (odak
+değişmez). Sonuçlar `~/.config/celal/tasks.json`'da 24 saat tutulur; Celal yeniden başlasa da
+`GET /task/<id>` döner (yarıda kalan görev `error` olur).
+
+## `celal hermes`
+
+```bash
+uv run celal hermes "sunucudaki hermes cron listesini ver"
+```
+
+Hermes API'sine (model `celal`, sohbet `<conversation>-claude`) tek istek atar, cevabı akarken stdout'a
+yazar; hata stderr'e, çıkış kodu 1/2. Tünel açık değilse geçici bir `ssh -L` açar, iş bitince kapatır.
+Model diski gerekmez. Mac'teki Claude sunucu işini bununla devreder; Hermes'e "işi Mac'e geri gönderme"
+denir.
+
+**Güvenlik:** Mac'teki Claude izin sormadan çalışır (`bypassPermissions`): dosya silebilir, komut
+çalıştırabilir. Bu yola yalnız iki giriş var: Celal penceresi/terminali ve Hermes. Hermes'e yalnız
+Mirza'nın Telegram'ı ve Celal ulaşır (API sunucuda yalnız 127.0.0.1'de); yerel API yalnız 127.0.0.1'de
+dinler ve her istekte `mac-api-key` bearer anahtarını ister (sabit zamanlı karşılaştırma). Anahtar hiçbir
+yere loglanmaz. Bu zinciri genişletme (Hermes'e başka kanal açma, API'yi dış ağa açma) Mac'i de açar.
 
 ## Test ederken
 
-- Gerçek sunucuyla denerken ayrı bir sohbet adı kullan, Mirza'nın geçmişi kirlenmesin:
-  `CELAL_CONVERSATION=celal-test-$(date +%s) uv run celal --text`
+- Gerçek sunucuyla denerken ayrı bir sohbet adı ve ayrı sekme deposu kullan, Mirza'nın geçmişi ve
+  sekmeleri kirlenmesin:
+  `CELAL_CONVERSATION=celal-test-$(date +%s) CELAL_STATE_DIR=/tmp/celal-test uv run celal --text`
 - Bitince test oturumunu sunucuda sil: `hermes sessions delete --yes <oturum-id>`
   (id: `hermes sessions list --source api_server`), saklanan cevabı da API'den sil:
   `DELETE /v1/responses/<resp_id>`.
 - Kendi başlattığın her süreci kapat (Celal, tünel); mikrofonu açık bırakma.
   Menüden **Çıkış** ya da Ctrl-C tüneli de kapatır; `pgrep -fl "ssh -N -L 8642"` ve
   `pgrep -fl "ssh -N -R 127.0.0.1:8643"` boş dönmeli.
-- Hermes → Mac denemesi: Celal açıkken `--text` modunda (mikrofon kapalı) Hermes API'ye
-  "mac_task ile Mac'te `uname -a` çalıştır ve sonucu söyle" gönder; Celal terminalinde
-  `[mac] Hermes'ten görev başladı` satırı görünür, cevap Hermes'ten döner. Celal kapalıyken aynı
-  istek "Mac bağlı değil" döner.
+- Hermes → Mac denemesi (sunucuda): `curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/celal/mac-api-key)"
+  -d '{"task":"uname -a çalıştır"}' http://127.0.0.1:8643/task` hemen `task_id` döner, pencerede 📱 sekme açılır;
+  `GET /task/<id>` sonucu verir. Celal kapalıyken bağlantı reddedilir.
 
 ## Nasıl çalışır
 
-- `src/celal/tunnel.py`: `TunnelManager`, ssh alt sürecini izler, koparsa geri açar (1-2-5-10 s);
-  ssh açık kalıp port 15 s'de açılmazsa "bağlanıyor"da takılmaz, ssh'ı kapatıp yeniden dener.
-  `ReverseTunnel`: Hermes → Mac için ayrı `ssh -R` süreci.
-- Sağlık kontrolü (`core.py`): ssh açık ama Hermes cevap vermiyorsa "Hermes yanıt vermiyor" gösterir;
-  tüneli 9 s, 18 s, 36 s … en çok ~5 dk arayla yeniden başlatır (sonsuz 9 s döngüsü yok).
-- Tur kimliği (`core.py`): her mesajın bir turu var; kesilen eski cevabın geç gelen "kesildi" olayı
-  yeni turu bitmiş saymaz.
-- `src/celal/mac_task.py`: `claude -p` stream-json okuyucu, Türkçe adım satırları, sesli özet, Durdur.
-  `src/celal/mac_api.py`: 127.0.0.1:8643'teki küçük HTTP API (bearer anahtar).
-- `src/celal/hermes.py`: `HermesClient`, `/v1/responses` (`conversation` ile sohbet sunucuda)
-  ya da `/v1/chat/completions`, ikisi de SSE akışı. Sesli kullanım için kısa cevap yönergesi gönderir.
-- `src/celal/llm_hermes.py`: Hermes'i Pipecat LLM servisi yapar; TTS'e giden metinden
-  markdown ve emoji temizlenir (`speech_text.py`), ekranda asıl metin görünür.
-- `src/celal/echo_gate.py`: konuşma penceresi boyunca mikrofon sesini ve transkriptleri düşürür.
-- `src/celal/core.py`: tünel + sağlık kontrolü + pipeline; pencere ve terminal aynı çekirdeği kullanır.
-- `src/celal/ui.py` + `web/index.html`: pywebview penceresi; `menubar.py`: rumps simgesi
-  (ayrı süreç, çünkü iki kütüphane de Cocoa döngüsünü ister); `hotkey.py`: Carbon kısayolu.
-- Faz 1'den kalanlar: `audio_io.py` (sounddevice transport), `tts_ema.py`, `tts_say.py`,
-  `stt_filter.py` (Whisper'ın "Altyazı M.K." uydurmaları), `timing.py`, `bench.py`.
+- `src/celal/core.py`: tünel + sağlık kontrolü + sekmeler + yönlendirme + ses; pencere ve terminal aynı
+  çekirdeği kullanır. Yalnız aktif sekmenin cevabını cümle cümle `TTSSpeakFrame` ile okur.
+- `src/celal/tabs.py`: `TabManager` (sekme başına kuyruk ve işçi, ortak `max_parallel` semaforu, Durdur,
+  boşta kapanma, `tabs.json`) ve `TaskStore` (`tasks.json`, 24 saat).
+- `src/celal/brains.py`: `MacClaudeBrain` (Agent SDK `ClaudeSDKClient`; okuyucu görev, arka plan işlerini
+  bekleme, kesme) ve `HermesBrain` (tek Hermes isteği; Durdur iptal etmez).
+- `src/celal/mac_task.py`: yönlendirme kuralı (`route`), ön ek ve klasör ayrıştırma, Türkçe adım satırları.
+- `src/celal/mac_api.py`: 127.0.0.1:8643'teki küçük HTTP API (bearer anahtar).
+- `src/celal/pipeline.py`: Pipecat yalnız kulak ve ağız: mikrofon → VAD/Smart Turn → Whisper → sesli komut
+  kapısı → `TurnSink` (bitmiş sesli tur yönlendiriciye gider); `TTSSpeakFrame` → TTS → hoparlör.
+- `src/celal/hermes.py`: `HermesClient`, `/v1/responses` ya da `/v1/chat/completions`, SSE akışı.
+- `src/celal/tunnel.py`: `TunnelManager` (ssh -L, yeniden kurma) ve `ReverseTunnel` (ssh -R).
+- `src/celal/echo_gate.py`: Celal konuşurken mikrofonu yok sayar; `wake.py`: "Celal dinlemeye başla/durdur".
+- `src/celal/ui.py` + `web/index.html`: pywebview penceresi (sekme şeridi); `menubar.py`: rumps simgesi
+  (ayrı süreç); `hotkey.py`: Carbon kısayolu.
+- Faz 1'den kalanlar: `audio_io.py`, `tts_ema.py`, `tts_say.py`, `stt_filter.py`, `speech_text.py`, `bench.py`.
 
 ## Bilinen sınırlar
 
 - Barge-in kapalıyken Celal konuşurken söylediğin duyulmaz; durdurmak için **Durdur**/Esc.
 - Whisper parça bazlıdır; konuşman bitince ~1–2 s'de transkript gelir.
-- Hermes ilk kelimeyi 5–15 s'de verir (sunucu tarafı ajan + araçlar).
-- `responses` modunda Durdur akışı keser; sunucu o turu yine de sohbete yazabilir.
-- Celal SIGKILL ile ölürse ssh tüneli açık kalabilir; bir sonraki açılış onu "harici tünel" olarak kullanır.
-- Mac görevleri Celal yeniden başlayınca unutulur (durumları bellekte); Hermes'in `mac_task_status`'u
-  eski bir görevi bulamaz. Hermes en çok 4 dk bekler, daha uzun işler `mac_task_status` ile izlenir.
-- Sesli "Mac'te …" isteği Whisper'ın tek parçada yazdığı cümlede çalışır; "Mac'te" ayrı parçaya
-  düşerse istek Hermes'e gider.
+- Hermes ilk kelimeyi 5–15 s'de, araç kullanırsa daha geç verir; `celal hermes` ile devredilen iş
+  (ör. cron listesi) ~30 s sürebilir.
+- Ön eksiz mesaj Hermes sekmesinde de Mac'e gider; Hermes'le sohbete devam etmek için her mesaja
+  "sunucuda …" ile başla.
+- Mac uykudan dönünce ya da Celal SIGKILL ile ölünce sunucu eski ssh oturumunu ve 8643 portunu tutabilir.
+  Celal'in temizlik komutu (`ss -p` ile sshd pid'i bulup öldürme) sunucuda pid'i göremeyebilir (sshd
+  süreçleri dump edilemez); o zaman ters tünel "izin vermedi" der, eski oturum TCP keepalive ile (~2 saat)
+  ya da elle kapatılınca düzelir.
+- 📱 görevlerde `access`/klasör kilidi yok: aynı klasörde iki yazan görev yan yana çalışabilir.
 
 ## Lisans
 
