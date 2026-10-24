@@ -1,4 +1,4 @@
-from jarvis.timing import TurnTimer
+from celal.timing import TurnTimer
 
 
 def test_turn_timer_line():
@@ -30,8 +30,8 @@ def test_text_mode_has_no_stt():
 
 
 def test_hallucination_filter():
-    from jarvis.stt_filter import strip_hallucinations
+    from celal.stt_filter import strip_hallucinations
 
     assert strip_hallucinations("Lütfen raporu bana gönder. Altyazı M.K.") == "Lütfen raporu bana gönder."
     assert strip_hallucinations("İzlediğiniz için teşekkürler.") == ""
-    assert strip_hallucinations("Merhaba Vera") == "Merhaba Vera"
+    assert strip_hallucinations("Merhaba Celal") == "Merhaba Celal"

@@ -5,3 +5,6 @@ __pycache__/
 models/
 *.wav
 .DS_Store
+# makineye özel ayar ve sırlar repoya girmez
+api-key
+config.toml

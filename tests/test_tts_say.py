@@ -6,7 +6,7 @@ import pytest
 from pipecat.frames.frames import TTSAudioRawFrame, TTSSpeakFrame
 from pipecat.tests.utils import SleepFrame, run_test
 
-from jarvis.tts_say import SayTTSService, say_to_pcm
+from celal.tts_say import SayTTSService, say_to_pcm
 
 pytestmark = pytest.mark.skipif(shutil.which("say") is None, reason="macOS `say` required")
 

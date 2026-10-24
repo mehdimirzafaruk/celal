@@ -1,4 +1,4 @@
-"""`jarvis bench`: Whisper Turkish accuracy/speed, TTS TTFA/RTF, peak RSS."""
+"""`celal --bench`: Whisper Turkish accuracy/speed, TTS TTFA/RTF, peak RSS."""
 
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ def bench_whisper(repo: str, audio: np.ndarray) -> dict:
 
 
 def bench_ema() -> dict:
-    from jarvis.tts_ema import EMALightningTTSService
+    from celal.tts_ema import EMALightningTTSService
 
     t = time.perf_counter()
     engine = EMALightningTTSService.load_engine("cpu")
@@ -96,7 +96,7 @@ def bench_ema() -> dict:
 
 
 def bench_say() -> dict:
-    from jarvis.tts_say import say_to_pcm
+    from celal.tts_say import say_to_pcm
 
     asyncio.run(say_to_pcm("Merhaba.", "Yelda", 24000))
     t = time.perf_counter()
@@ -108,7 +108,7 @@ def bench_say() -> dict:
 
 
 def run_bench(stt_models: list[str], skip_ema: bool = False) -> int:
-    from jarvis.pipeline import STT_MODELS
+    from celal.pipeline import STT_MODELS
 
     rows: list[str] = []
     with tempfile.TemporaryDirectory() as tmp:
@@ -119,7 +119,7 @@ def run_bench(stt_models: list[str], skip_ema: bool = False) -> int:
         print(f"Referans ({dur:.1f}s, say -v Yelda): {ref}\n")
         for name in stt_models:
             r = bench_whisper(STT_MODELS[name], audio)
-            from jarvis.stt_filter import strip_hallucinations
+            from celal.stt_filter import strip_hallucinations
 
             raw_errs, n = word_errors(ref, r["text"])
             filtered = strip_hallucinations(r["text"])

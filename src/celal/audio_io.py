@@ -42,6 +42,7 @@ class SoundDeviceTransportParams(TransportParams):
     record_path: str | None = None
     input_wav: str | None = None
     input_wav_tail_secs: float = 8.0
+    capture_on_start: bool = True
 
 
 class SoundDeviceInputTransport(BaseInputTransport):
@@ -54,6 +55,7 @@ class SoundDeviceInputTransport(BaseInputTransport):
         self._stream: sd.RawInputStream | None = None
         self.frames_captured = 0
         self.peak = 0  # max |sample| seen; stays 0 when macOS denies mic access
+        self.capturing = params.capture_on_start
 
     async def setup(self, setup: FrameProcessorSetup):
         await super().setup(setup)
@@ -70,8 +72,19 @@ class SoundDeviceInputTransport(BaseInputTransport):
     async def start(self, frame: StartFrame):
         await super().start(frame)
         if self._stream:
-            self._stream.start()
+            if self.capturing:
+                self._stream.start()
             await self.set_transport_ready(frame)
+
+    def set_capturing(self, on: bool) -> None:
+        """Mic button: open/close the input stream (macOS mic indicator follows)."""
+        self.capturing = on
+        if not self._stream:
+            return
+        if on and not self._stream.active:
+            self._stream.start()
+        elif not on and self._stream.active:
+            self._stream.stop()
 
     async def cleanup(self):
         await super().cleanup()
@@ -84,6 +97,8 @@ class SoundDeviceInputTransport(BaseInputTransport):
             self._stream = None
 
     def _audio_in_callback(self, indata, frames, time_info, status):
+        if not self.capturing:
+            return
         if status:
             logger.debug(f"input status: {status}")
         self.frames_captured += 1

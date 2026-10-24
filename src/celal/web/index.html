@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Celal</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262a33; --text: #e6e8ee; --muted: #8b91a0;
+    --accent: #5aa9ff; --ok: #3ccf8e; --bad: #ff5d5d; --warn: #f5b84a; --me: #1f2b3d; --him: #1b1f27;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line);
+    background: var(--panel); -webkit-user-select: none; user-select: none; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  .pill { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
+    display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .pill.ok .dot { background: var(--ok); } .pill.ok { color: var(--ok); border-color: #1f4d39; }
+  .pill.bad .dot { background: var(--bad); } .pill.bad { color: var(--bad); border-color: #5a2626; }
+  #state { margin-left: auto; }
+  #state.listening { color: var(--ok); } #state.thinking { color: var(--warn); } #state.speaking { color: var(--accent); }
+  #state.thinking .dot { background: var(--warn); animation: pulse 1s infinite; }
+  #state.speaking .dot { background: var(--accent); animation: pulse .6s infinite; }
+  #state.listening .dot { background: var(--ok); }
+  @keyframes pulse { 50% { opacity: .25; } }
+  #reason { font-size: 11px; color: var(--muted); padding: 4px 16px; border-bottom: 1px solid var(--line); min-height: 22px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #log { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 88%; padding: 9px 12px; border-radius: 12px; white-space: pre-wrap; word-wrap: break-word; }
+  .msg.me { align-self: flex-end; background: var(--me); border-bottom-right-radius: 4px; }
+  .msg.him { align-self: flex-start; background: var(--him); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .msg .who { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  .note { align-self: center; font-size: 12px; color: var(--muted); }
+  .note.err { color: var(--bad); }
+  .note.tool { color: var(--warn); }
+  .empty { margin: auto; color: var(--muted); text-align: center; font-size: 13px; }
+  footer { border-top: 1px solid var(--line); background: var(--panel); padding: 10px 12px; display: flex; gap: 8px; align-items: flex-end; }
+  textarea { flex: 1; resize: none; min-height: 38px; max-height: 140px; padding: 9px 11px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; outline: none; }
+  textarea:focus { border-color: var(--accent); }
+  button { height: 38px; min-width: 38px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--line);
+    background: #20242d; color: var(--text); font: inherit; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #0b1220; border-color: var(--accent); font-weight: 600; }
+  button.mic { display: inline-flex; align-items: center; gap: 7px; }
+  button.mic .rec { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  button.mic.on { background: #3a1416; border-color: var(--bad); color: #ffd7d7; }
+  button.mic.on .rec { background: var(--bad); box-shadow: 0 0 0 3px rgba(255,93,93,.25); animation: pulse 1.2s infinite; }
+  button.stop { background: #3a1d1d; border-color: #6b2b2b; color: #ffcaca; font-weight: 600; }
+  button.stop:hover { border-color: var(--bad); }
+  .hint { font-size: 11px; color: var(--muted); margin-left: auto; align-self: center; }
+  button:disabled { opacity: .45; cursor: default; }
+  .tools { display: flex; gap: 6px; }
+  .tools button { height: 26px; font-size: 12px; padding: 0 9px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Celal</h1>
+  <span id="conn" class="pill bad"><span class="dot"></span><span id="conn-text">bağlı değil</span></span>
+  <span id="state" class="pill"><span class="dot"></span><span id="state-text">hazır</span></span>
+</header>
+<div id="reason">başlıyor…</div>
+<main id="log"><div class="empty" id="empty">Yaz ya da mikrofona bas, konuş.<br>Celal sunucudaki Hermes ile cevap verir.</div></main>
+<footer>
+  <div style="display:flex;flex-direction:column;gap:6px;flex:1">
+    <div class="tools">
+      <button id="stop" class="stop" title="Konuşmayı durdurur, sunucudaki isteği iptal eder">■ Durdur</button>
+      <button id="newchat" title="Sunucuda yeni sohbet başlat">Yeni sohbet</button>
+      <span class="hint" id="hint">Mikrofon kapalı</span>
+    </div>
+    <div style="display:flex;gap:8px;align-items:flex-end">
+      <textarea id="input" rows="1" placeholder="Celal'e yaz… (Enter gönderir, Shift+Enter satır)"></textarea>
+      <button id="mic" class="mic" title="Mikrofonu aç/kapat"><span class="rec"></span><span id="mic-text">Dinle</span></button>
+      <button id="send" class="primary">Gönder</button>
+    </div>
+  </div>
+</footer>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const log = $("log");
+  let current = null;   // assistant bubble being streamed
+  let micOn = false;
+  let hotkey = "";
+  const STATE_CLASS = { "dinliyor": "listening", "düşünüyor": "thinking", "konuşuyor": "speaking" };
+
+  function atBottom() { return log.scrollHeight - log.scrollTop - log.clientHeight < 60; }
+  function add(el) { const stick = atBottom(); const e = $("empty"); if (e) e.remove(); log.appendChild(el); if (stick) log.scrollTop = log.scrollHeight; }
+  function bubble(cls, who, text) {
+    const d = document.createElement("div"); d.className = "msg " + cls;
+    const w = document.createElement("span"); w.className = "who"; w.textContent = who; d.appendChild(w);
+    const t = document.createElement("span"); t.className = "body"; t.textContent = text; d.appendChild(t);
+    add(d); return d;
+  }
+  function note(text, cls) { const d = document.createElement("div"); d.className = "note " + (cls || ""); d.textContent = text; add(d); }
+
+  function status(s) {
+    const conn = $("conn");
+    conn.className = "pill " + (s.connected ? "ok" : "bad");
+    $("conn-text").textContent = s.conn;
+    const st = $("state"); st.className = "pill " + (STATE_CLASS[s.state] || "");
+    $("state-text").textContent = s.state;
+    $("reason").textContent = (s.connected ? "Hermes: " : "Hermes: ") + s.reason + "  ·  tünel: " + s.tunnel;
+    micOn = !!s.mic; const mic = $("mic");
+    mic.classList.toggle("on", micOn); $("mic-text").textContent = micOn ? "Dinliyor" : "Dinle";
+    mic.disabled = !s.voice;
+    $("hint").textContent = (micOn ? "Mikrofon AÇIK" : "Mikrofon kapalı") + (hotkey ? " · " + hotkey : "");
+  }
+
+  window.celalEvent = function (ev) {
+    switch (ev.type) {
+      case "status": status(ev); break;
+      case "user": bubble("me", ev.source === "mic" ? "sen (ses)" : "sen", ev.text); break;
+      case "assistant_start": current = null; break;
+      case "assistant_delta": {
+        if (!current) current = bubble("him", "Celal", "");
+        const stick = atBottom();
+        current.querySelector(".body").textContent += ev.text;
+        if (stick) log.scrollTop = log.scrollHeight;
+        break;
+      }
+      case "assistant_end":
+        if (current) { const b = current.querySelector(".body"); b.textContent = b.textContent.replace(/^\s+/, ""); }
+        if (ev.note === "kesildi" && current) note("(kesildi)");
+        current = null; break;
+      case "tool": note("araç çalışıyor: " + ev.name, "tool"); break;
+      case "error": note(ev.text, "err"); break;
+      case "info": note(ev.text); break;
+      case "hotkey": hotkey = ev.spec; $("hint").textContent = (micOn ? "Mikrofon AÇIK" : "Mikrofon kapalı") + " · " + hotkey; break;
+    }
+    return true;
+  };
+  window.celalEvents = function (evs) { evs.forEach(window.celalEvent); return true; };
+
+  function api() { return (window.pywebview && window.pywebview.api) || null; }
+  function send() {
+    const t = $("input").value.trim(); if (!t || !api()) return;
+    $("input").value = ""; autosize(); api().send_text(t);
+  }
+  function autosize() { const i = $("input"); i.style.height = "auto"; i.style.height = Math.min(i.scrollHeight, 140) + "px"; }
+  $("send").onclick = send;
+  $("input").addEventListener("input", autosize);
+  $("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); api() && api().interrupt(); } });
+  $("mic").onclick = () => api() && api().set_mic(!micOn);
+  $("stop").onclick = () => api() && api().interrupt();
+  $("newchat").onclick = () => api() && api().new_conversation();
+  window.addEventListener("pywebviewready", () => {
+    api().ready().then((evs) => { if (evs) window.celalEvents(evs); });
+    $("input").focus();
+  });
+})();
+</script>
+</body>
+</html>

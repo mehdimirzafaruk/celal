@@ -23,7 +23,7 @@ CHUNK_SECONDS = 0.5
 
 async def say_to_pcm(text: str, voice: str = "Yelda", sample_rate: int = 24000, rate: int | None = None) -> bytes:
     """Render ``text`` with macOS ``say`` and return mono int16 PCM at ``sample_rate``."""
-    fd, path = tempfile.mkstemp(prefix="jarvis-say-", suffix=".wav")
+    fd, path = tempfile.mkstemp(prefix="celal-say-", suffix=".wav")
     os.close(fd)
     try:
         cmd = ["say", "-v", voice, "-o", path, "--file-format=WAVE", f"--data-format=LEI16@{sample_rate}"]

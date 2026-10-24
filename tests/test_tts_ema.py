@@ -6,7 +6,7 @@ import numpy as np
 from pipecat.frames.frames import TTSAudioRawFrame, TTSSpeakFrame, TTSStartedFrame, TTSStoppedFrame
 from pipecat.tests.utils import SleepFrame, run_test
 
-from jarvis.tts_ema import EMALightningTTSService, float_to_int16_bytes, iterate_in_thread
+from celal.tts_ema import EMALightningTTSService, float_to_int16_bytes, iterate_in_thread
 
 
 class FakeEMA:

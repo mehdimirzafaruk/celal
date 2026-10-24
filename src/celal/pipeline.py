@@ -1,4 +1,4 @@
-"""Pipecat pipeline assembly for Vera (voice and text modes)."""
+"""Pipecat pipeline assembly for Celal (voice and text modes); the LLM is Hermes."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from pipecat.frames.frames import (
     ErrorFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
-    TranscriptionFrame,
     TTSStoppedFrame,
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
@@ -29,16 +28,21 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.services.whisper.stt import MLXModel, WhisperSTTServiceMLX
 from pipecat.transcriptions.language import Language
-from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
+from pipecat.turns.user_start import (
+    MinWordsUserTurnStartStrategy,
+    TranscriptionUserTurnStartStrategy,
+    VADUserTurnStartStrategy,
+)
 from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
-from jarvis.audio_io import SoundDeviceTransport, SoundDeviceTransportParams
-from jarvis.llm_claude import ClaudeAgentLLMService
-from jarvis.stt_filter import WhisperHallucinationFilter
-from jarvis.timing import TurnTimer, TurnTimingObserver
-from jarvis.tts_ema import EMALightningTTSService
-from jarvis.tts_say import SayTTSService
+from celal.echo_gate import MicGate, SpeakingWindow, TranscriptGate
+from celal.audio_io import SoundDeviceTransport, SoundDeviceTransportParams
+from celal.llm_hermes import HermesLLMService
+from celal.stt_filter import WhisperHallucinationFilter
+from celal.timing import TurnTimer, TurnTimingObserver
+from celal.tts_ema import EMALightningTTSService
+from celal.tts_say import SayTTSService
 
 IN_RATE = 16000
 OUT_RATE = 24000
@@ -47,24 +51,30 @@ STT_MODELS = {
     "turbo": MLXModel.LARGE_V3_TURBO.value,
     "turbo-q4": MLXModel.LARGE_V3_TURBO_Q4.value,
 }
-LLM_MODELS = {"haiku": "haiku", "sonnet": "sonnet"}
 
 
 @dataclass
 class Config:
     tts: str = "ema"
     stt: str = "turbo"
-    model: str = "haiku"
-    min_words: int = 2
+    # 0: TTS stops as soon as VAD hears the user (needs headphones; no echo
+    # cancellation). N >= 1: only after N transcribed words (speaker-friendly).
+    min_words: int = 0
+    # False (default): mic is ignored while Celal speaks (+ tail), so speakers
+    # work without headphones. True: talking over Celal stops it (headphones).
+    barge_in: bool = False
+    echo_tail_secs: float = 0.4
     play: bool = True
     record_path: str | None = None
     input_wav: str | None = None
     input_wav_tail_secs: float = 8.0
+    mic_on_start: bool = True
     printer: Callable[[str], None] = field(default=print)
+    print_sentences: bool = True
 
 
 def make_tts(cfg: Config) -> EMALightningTTSService | SayTTSService:
-    on_sentence = lambda s: cfg.printer(f"[vera] {s}")  # noqa: E731
+    on_sentence = (lambda s: cfg.printer(f"[celal] {s}")) if cfg.print_sentences else None  # noqa: E731
     if cfg.tts == "ema":
         return EMALightningTTSService(sample_rate=OUT_RATE, on_sentence=on_sentence)
     if cfg.tts == "say":
@@ -80,23 +90,11 @@ def make_stt(cfg: Config) -> WhisperSTTServiceMLX:
     )
 
 
-def make_llm(cfg: Config) -> ClaudeAgentLLMService:
-    return ClaudeAgentLLMService(model=LLM_MODELS.get(cfg.model, cfg.model))
-
-
-class ConsoleObserver(BaseObserver):
-    """Prints ``[sen] …`` for final transcripts and surfaces pipeline errors."""
-
-    def __init__(self, printer: Callable[[str], None] = print, **kwargs):
-        super().__init__(observe_every_push=False, **kwargs)
-        self._print = printer
-
-    async def on_push_frame(self, data: FramePushed):
-        frame = data.frame
-        if isinstance(frame, TranscriptionFrame):
-            self._print(f"[sen] {frame.text.strip()}")
-        elif isinstance(frame, ErrorFrame):
-            self._print(f"[hata] {frame.error}")
+def turn_start_strategies(min_words: int):
+    """Only matters with barge-in; without it the mic is gated while Celal speaks."""
+    if min_words and min_words > 0:
+        return [MinWordsUserTurnStartStrategy(min_words=min_words)]
+    return [VADUserTurnStartStrategy(), TranscriptionUserTurnStartStrategy()]
 
 
 class ReplyTracker(BaseObserver):
@@ -144,11 +142,12 @@ class ReplyTracker(BaseObserver):
 class Built:
     worker: PipelineWorker
     transport: SoundDeviceTransport
-    llm: ClaudeAgentLLMService
+    llm: HermesLLMService
     tts: EMALightningTTSService | SayTTSService
     timer: TurnTimer
     reply: ReplyTracker
     user_aggregator: object
+    window: SpeakingWindow | None = None
 
 
 def _worker(pipeline: Pipeline, observers: list[BaseObserver]) -> PipelineWorker:
@@ -165,8 +164,8 @@ def _worker(pipeline: Pipeline, observers: list[BaseObserver]) -> PipelineWorker
     )
 
 
-def build_voice(cfg: Config) -> Built:
-    """Mic → Silero VAD + Smart Turn v3 → Whisper (tr) → Claude → TTS → speaker."""
+def build_voice(cfg: Config, llm: HermesLLMService, observers: list[BaseObserver] | None = None) -> Built:
+    """Mic → Silero VAD + Smart Turn v3 → Whisper (tr) → Hermes → TTS → speaker."""
     transport = SoundDeviceTransport(
         SoundDeviceTransportParams(
             audio_in_enabled=True,
@@ -177,10 +176,10 @@ def build_voice(cfg: Config) -> Built:
             record_path=cfg.record_path,
             input_wav=cfg.input_wav,
             input_wav_tail_secs=cfg.input_wav_tail_secs,
+            capture_on_start=cfg.mic_on_start,
         )
     )
     stt = make_stt(cfg)
-    llm = make_llm(cfg)
     tts = make_tts(cfg)
     context = LLMContext()
     aggregators = LLMContextAggregatorPair(
@@ -188,17 +187,20 @@ def build_voice(cfg: Config) -> Built:
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(params=VADParams()),
             user_turn_strategies=UserTurnStrategies(
-                # While Vera speaks, at least `min_words` words are needed to
-                # interrupt ("hı hı" does not); otherwise one word starts a turn.
-                start=[MinWordsUserTurnStartStrategy(min_words=cfg.min_words)],
+                start=turn_start_strategies(cfg.min_words),
                 stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())],
             ),
         ),
     )
+    window = None if cfg.barge_in else SpeakingWindow(tail=cfg.echo_tail_secs)
+    gate_in = [MicGate(window)] if window else []
+    gate_stt = [TranscriptGate(window)] if window else []
     pipeline = Pipeline(
         [
             transport.input(),
+            *gate_in,
             stt,
+            *gate_stt,
             WhisperHallucinationFilter(),
             aggregators.user(),
             llm,
@@ -209,13 +211,13 @@ def build_voice(cfg: Config) -> Built:
     )
     timer = TurnTimer(emit=cfg.printer)
     reply = ReplyTracker()
-    worker = _worker(pipeline, [TurnTimingObserver(timer), ConsoleObserver(cfg.printer), reply])
-    logger.debug(f"voice pipeline: stt={STT_MODELS[cfg.stt]} llm={cfg.model} tts={cfg.tts}")
-    return Built(worker, transport, llm, tts, timer, reply, aggregators.user())
+    worker = _worker(pipeline, [TurnTimingObserver(timer), reply, *(observers or [])])
+    logger.debug(f"voice pipeline: stt={STT_MODELS[cfg.stt]} tts={cfg.tts} barge_in={cfg.barge_in}")
+    return Built(worker, transport, llm, tts, timer, reply, aggregators.user(), window)
 
 
-def build_text(cfg: Config) -> Built:
-    """Typed prompt → Claude → TTS → speaker (and/or WAV)."""
+def build_text(cfg: Config, llm: HermesLLMService, observers: list[BaseObserver] | None = None) -> Built:
+    """Typed prompt → Hermes → TTS → speaker (and/or WAV)."""
     transport = SoundDeviceTransport(
         SoundDeviceTransportParams(
             audio_out_enabled=True,
@@ -224,12 +226,11 @@ def build_text(cfg: Config) -> Built:
             record_path=cfg.record_path,
         )
     )
-    llm = make_llm(cfg)
     tts = make_tts(cfg)
     context = LLMContext()
     aggregators = LLMContextAggregatorPair(context)
     pipeline = Pipeline([aggregators.user(), llm, tts, transport.output(), aggregators.assistant()])
     timer = TurnTimer(emit=cfg.printer)
     reply = ReplyTracker()
-    worker = _worker(pipeline, [TurnTimingObserver(timer), ConsoleObserver(cfg.printer), reply])
+    worker = _worker(pipeline, [TurnTimingObserver(timer), reply, *(observers or [])])
     return Built(worker, transport, llm, tts, timer, reply, aggregators.user())

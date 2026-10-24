@@ -1,7 +1,7 @@
 [project]
-name = "jarvis"
-version = "0.1.0"
-description = "Vera: yerel, Türkçe sesli asistan (Pipecat + Whisper MLX + Claude Agent SDK + EMA Lightning)"
+name = "celal"
+version = "0.2.0"
+description = "Celal: Hermes sunucusuna bağlanan yerel Türkçe sesli asistan (Mac penceresi + Whisper MLX + EMA Lightning)"
 readme = "README.md"
 license = "MIT"
 authors = [
@@ -9,14 +9,16 @@ authors = [
 ]
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "claude-agent-sdk>=0.2.170",
     "ema-lightning>=1.1.2",
+    "httpx>=0.27",
     "pipecat-ai[mlx-whisper,whisper]>=1.13,<1.14",
+    "pywebview>=5.3",
+    "rumps>=0.4.0",
     "sounddevice>=0.5.6",
 ]
 
 [project.scripts]
-jarvis = "jarvis.cli:main"
+celal = "celal.cli:main"
 
 [dependency-groups]
 dev = [
