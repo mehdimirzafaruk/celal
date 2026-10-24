@@ -49,15 +49,21 @@ async def _run_text(settings, cfg, args) -> int:
     cfg.print_sentences = False
     voice = bool(args.mic)  # --text --mic: mic open too (speaker test / terminal voice chat)
     core = CelalCore(settings, cfg, voice=voice, emit=show)
-    await core.start()
-    if await core.wait_connected(args.connect_timeout):
-        print(f"Hermes'e bağlı ({settings.api}, sohbet: {core.client.conversation}).", flush=True)
-    else:
-        print(f"[hata] Hermes'e bağlanılamadı: {core.reason} (tünel: {core.tunnel.status} {core.tunnel.detail})", flush=True)
-    interactive = sys.stdin.isatty()
-    lines = _stdin_lines()
     code = 0
     try:
+        # start() opens the ssh tunnel first; if it fails later (TTS, audio
+        # device) the finally below still closes the tunnel.
+        try:
+            await core.start()
+        except Exception as e:  # noqa: BLE001
+            print(f"[hata] Celal başlatılamadı: {e}", flush=True)
+            return 1
+        if await core.wait_connected(args.connect_timeout):
+            print(f"Hermes'e bağlı ({settings.api}, sohbet: {core.client.conversation}).", flush=True)
+        else:
+            print(f"[hata] Hermes'e bağlanılamadı: {core.reason} (tünel: {core.tunnel.status} {core.tunnel.detail})", flush=True)
+        interactive = sys.stdin.isatty()
+        lines = _stdin_lines()
         while True:
             if interactive:
                 print("> ", end="", flush=True)
@@ -136,7 +142,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from celal.paths import ModelDiskMissing, configure_model_storage
 
-    needs_models = args.bench or not args.text or args.tts == "ema"
+    # Window and --mic use Whisper; ema TTS and --bench load models too. Only
+    # "--text --tts say" without a microphone runs without the model disk.
+    needs_models = args.bench or not args.text or args.mic or args.tts == "ema"
     try:
         configure_model_storage()
     except ModelDiskMissing as e:

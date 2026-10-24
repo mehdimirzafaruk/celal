@@ -285,5 +285,6 @@ def run_window(settings: Settings, cfg: Config, *, debug: bool = False, menubar:
             asyncio.run_coroutine_threadsafe(core.shutdown(), loop).result(timeout=15)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"shutdown: {e}")
+            core.tunnel.kill_now()
         loop.call_soon_threadsafe(loop.stop)
     return 1 if start_error else 0

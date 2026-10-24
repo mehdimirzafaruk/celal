@@ -310,18 +310,20 @@ class CelalCore:
     async def shutdown(self) -> None:
         for t in self._tasks:
             t.cancel()
-        if self.built is not None:
-            try:
-                await asyncio.wait_for(self.built.worker.cancel(reason="kapanış"), timeout=5)
-            except Exception as e:  # noqa: BLE001
-                logger.debug(f"worker cancel: {e}")
-        if self._runner_task is not None:
-            try:
-                await asyncio.wait_for(self._runner_task, timeout=5)
-            except Exception:  # noqa: BLE001
-                self._runner_task.cancel()
-        await self.tunnel.stop()
-        await self.client.aclose()
+        try:
+            if self.built is not None:
+                try:
+                    await asyncio.wait_for(self.built.worker.cancel(reason="kapanış"), timeout=5)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(f"worker cancel: {e}")
+            if self._runner_task is not None:
+                try:
+                    await asyncio.wait_for(self._runner_task, timeout=5)
+                except Exception:  # noqa: BLE001
+                    self._runner_task.cancel()
+        finally:
+            await self.tunnel.stop()
+            await self.client.aclose()
 
     # ---- actions ------------------------------------------------------
     @property

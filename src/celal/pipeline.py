@@ -68,7 +68,7 @@ class Config:
     record_path: str | None = None
     input_wav: str | None = None
     input_wav_tail_secs: float = 8.0
-    mic_on_start: bool = True
+    mic_on_start: bool = False  # mic stays closed until the user opens it
     printer: Callable[[str], None] = field(default=print)
     print_sentences: bool = True
 

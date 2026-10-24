@@ -41,7 +41,8 @@ Klasör yoksa Celal açılmaz ve şunu yazar:
 hata: model diski takılı değil: /Volumes/KIOXIA/Modeller bulunamadı. ...
 ```
 
-İç diske sessizce bir şey indirilmez. (`--text --tts say` model istemez, disk olmadan da çalışır.)
+İç diske sessizce bir şey indirilmez. (Mikrofonsuz `--text --tts say` model istemez, disk olmadan da
+çalışır; `--mic` Whisper'a ihtiyaç duyduğu için diski ister.)
 İlk çalıştırmada eksik modeller diske iner: Whisper turbo ~1,6 GB, EMA Lightning ~34 MB.
 Smart Turn v3 ve Silero Pipecat paketinin içinde gelir.
 
@@ -84,8 +85,10 @@ Ortam değişkenleri dosyayı ezer: `CELAL_SSH_HOST`, `CELAL_SSH_KEY`, `CELAL_PO
 ### 3. İzinler
 
 macOS ilk açılışta mikrofon izni sorar (izin, komutu çalıştıran uygulamaya verilir: Terminal,
-iTerm…). Kısayol (Carbon hotkey) ek izin istemez. ctrl+space başka bir şeye atanmışsa
-(ör. "önceki giriş kaynağı") pencerede uyarı çıkar; `[ui] hotkey` ile başka bir tuş seç
+iTerm…). Kısayol (Carbon hotkey) ek izin istemez ve menü çubuğu sürecinde yaşar
+(`--no-menubar` ile kısayol da olmaz). Başka bir uygulama aynı tuşu kaydetmişse pencerede
+uyarı çıkar. macOS'un kendi kısayolları (ör. ctrl+space = "önceki giriş kaynağı") bu
+kontrolde görünmez: tuşa basınca mikrofon değişmiyorsa `[ui] hotkey` ile başka bir tuş seç
 (ör. `ctrl+option+space`).
 
 ## Çalıştırma
@@ -127,7 +130,7 @@ Bayraklar:
 | `--stt turbo\|turbo-q4` | Whisper modeli |
 | `--out dosya.wav` | çalınan sesi WAV'a da yaz |
 | `--no-play` | hoparlöre çalma |
-| `--no-menubar` | menü çubuğu simgesi olmasın |
+| `--no-menubar` | menü çubuğu simgesi olmasın (kısayol da kapanır) |
 | `--timeout N` | `--text`: cevap için en çok N saniye (varsayılan 300) |
 | `--log debug\|info\|warning` | log seviyesi |
 

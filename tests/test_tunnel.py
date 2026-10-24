@@ -137,3 +137,17 @@ async def test_spawn_failure_is_retried(settings):
     await wait_for(lambda: tm.status == OPEN)
     assert len(calls) == 3
     await tm.stop()
+
+
+async def test_cancelled_tunnel_task_kills_ssh(settings):
+    """Event loop teardown cancels run(); ssh (own session) must not be orphaned."""
+    world = World()
+    tm = make(settings, world)
+    task = tm.start()
+    await wait_for(lambda: tm.status == OPEN)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    assert world.procs[0].killed

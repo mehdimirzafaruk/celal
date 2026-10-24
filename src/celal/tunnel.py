@@ -135,6 +135,23 @@ class TunnelManager:
             return False
 
     async def run(self) -> None:
+        try:
+            await self._run()
+        finally:
+            # Cancelled (event loop teardown) while ssh runs: it is in its own
+            # session, so nothing else would ever stop it.
+            self.kill_now()
+
+    def kill_now(self) -> None:
+        """Synchronous last resort: SIGKILL our ssh if it is still running."""
+        proc = self._proc
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+
+    async def _run(self) -> None:
         failures = 0
         while not self._stop.is_set():
             if await self._port_open(self.settings.local_port):
