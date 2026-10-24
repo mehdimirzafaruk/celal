@@ -269,6 +269,7 @@ async def test_mac_prefix_runs_locally_and_speaks_summary(settings, fake_tts, tm
 
 
 async def test_mac_busy_toggle_and_durdur(settings, fake_tts, tmp_path):
+    from celal.mac_task import CONFLICT
     from fakes_mac import init_line
 
     events = []
@@ -283,8 +284,9 @@ async def test_mac_busy_toggle_and_durdur(settings, fake_tts, tmp_path):
     assert core.snapshot()["mac"]["mode"] is True
     assert await core.send_text("indirilenleri temizle")  # toggle on: no prefix needed
     assert core.snapshot()["mac"]["busy"] is True
-    assert await core.send_text("Mac'te başka iş") is False
-    assert any(e["type"] == "error" and e["text"] == "Mac'te bir iş zaten çalışıyor" for e in events)
+    assert await core.send_text("Mac'te başka iş") is False  # a second writer in the same (default) folder
+    assert any(e["type"] == "error" and e["text"] == CONFLICT for e in events)
+    assert core.snapshot()["mac"]["running"] == 1
     await core.interrupt()  # Durdur kills the claude process
     assert spawner.procs[0].terminated or spawner.procs[0].killed
     assert core.last_mac_task.status == "stopped" and not core.mac.busy

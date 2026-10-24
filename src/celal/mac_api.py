@@ -8,10 +8,16 @@ on the server. It is never logged.
 
 ::
 
-    POST /task      {"task": "...", "cwd": "~/Kod/x"?}  → 202 {"task_id", "status"}
-                                                       409 when a task is already running
+    POST /task      {"task": "...", "cwd": "~/Kod/x"?, "access": "read"|"write"?}
+                    → 202 {"task_id", "status", "cwd", "access"}
+                      409 {"error", "running_task_id", "running_task_ids"} all slots taken
+                      409 {"error", "conflict_task_id"} a "write" task already runs in that cwd
     GET  /task/<id> → 200 {"task_id", "status", "progress", "result", "error", "summary", ...}
-    GET  /health    → 200 {"ok": true, "busy": bool}
+    GET  /health    → 200 {"ok": true, "busy": bool, "running": n, "max_parallel": n}
+
+Up to ``max_parallel`` tasks run at once (``[mac] max_parallel``, default 3).
+``access`` defaults to "write"; send "read" for screenshots, listings and
+questions so several of them can share a working directory.
 
 Deliberately tiny (HTTP/1.1, one request per connection, JSON only), so no
 web framework is needed.
@@ -29,7 +35,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from celal.mac_task import BUSY, MacBusy, MacTaskRunner
+from celal.mac_task import ACCESS, WRITE, MacBusy, MacConflict, MacTaskRunner
 
 MAX_BODY = 64 * 1024
 REASONS = {200: "OK", 202: "Accepted", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found",
@@ -130,7 +136,12 @@ class MacApiServer:
             return 401, {"error": "yetkisiz"}
         path = path.split("?", 1)[0].rstrip("/") or "/"
         if path == "/health" and method == "GET":
-            return 200, {"ok": True, "busy": self.runner.busy}
+            return 200, {
+                "ok": True,
+                "busy": self.runner.busy,
+                "running": len(self.runner.running),
+                "max_parallel": self.runner.max_parallel,
+            }
         if path == "/task":
             if method != "POST":
                 return 405, {"error": "POST /task bekleniyor"}
@@ -142,18 +153,23 @@ class MacApiServer:
                 return 400, {"error": "gövde JSON nesnesi olmalı"}
             task = str(payload.get("task") or "").strip()
             cwd = payload.get("cwd")
+            access = str(payload.get("access") or WRITE).strip().lower()
             if not task:
                 return 400, {"error": "task boş"}
+            if access not in ACCESS:
+                return 400, {"error": "access 'read' ya da 'write' olmalı"}
             try:
-                t = self.runner.start(task, str(cwd) if cwd else None, source="hermes")
-            except MacBusy:
-                cur = self.runner.current
-                return 409, {"error": BUSY, "running_task_id": cur.task_id if cur else None}
+                t = self.runner.start(task, str(cwd) if cwd else None, source="hermes", access=access)
+            except MacConflict as e:
+                return 409, {"error": str(e), "conflict_task_id": e.task.task_id}
+            except MacBusy as e:
+                ids = [r.task_id for r in self.runner.running]
+                return 409, {"error": str(e), "running_task_id": ids[0] if ids else None, "running_task_ids": ids}
             except ValueError as e:
                 return 400, {"error": str(e)}
             if self._on_request:
-                self._on_request("task", {"task_id": t.task_id, "task": t.task, "cwd": t.cwd})
-            return 202, {"task_id": t.task_id, "status": t.status, "cwd": t.cwd}
+                self._on_request("task", {"task_id": t.task_id, "task": t.task, "cwd": t.cwd, "access": t.access})
+            return 202, {"task_id": t.task_id, "status": t.status, "cwd": t.cwd, "access": t.access}
         if path.startswith("/task/"):
             if method != "GET":
                 return 405, {"error": "GET /task/<id> bekleniyor"}

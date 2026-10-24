@@ -10,10 +10,15 @@ import pytest
 
 from celal.mac_task import (
     BUSY,
+    CONFLICT,
     DONE,
     FAILED,
+    READ,
+    RUNNING,
     STOPPED,
+    WRITE,
     MacBusy,
+    MacConflict,
     MacTaskRunner,
     child_env,
     claude_command,
@@ -117,11 +122,11 @@ async def test_stream_becomes_progress_and_result(tmp_path):
     assert not runner.busy
 
 
-async def test_one_task_at_a_time(tmp_path):
-    runner, _ = make_runner(tmp_path, lambda: FakeClaude([init_line()], hold=True))
+async def test_slot_limit_frees_on_stop(tmp_path):
+    runner, _ = make_runner(tmp_path, lambda: FakeClaude([init_line()], hold=True), max_parallel=1)
     t = runner.start("uzun iş")
     with pytest.raises(MacBusy, match=BUSY):
-        runner.start("ikinci iş")
+        runner.start("ikinci iş", access=READ)  # the limit counts readers too
     assert await runner.stop()
     assert t.status == STOPPED
     t2 = runner.start("şimdi olur")  # free again
@@ -215,3 +220,69 @@ async def test_real_subprocess_result(tmp_path):
     t = runner.start("uname")
     assert await t.wait(10)
     assert t.status == DONE and t.summary == "Linux sunucu. İkinci cümle."
+
+
+async def test_parallel_tasks_are_independent(tmp_path):
+    """Up to max_parallel tasks run at once; finishing/stopping one leaves the others alone."""
+    events = []
+    procs = []
+
+    def make():
+        p = FakeClaude([init_line()], hold=True)
+        procs.append(p)
+        return p
+
+    runner, _ = make_runner(tmp_path, make, events, max_parallel=3)
+    dirs = []
+    for i in range(3):
+        d = tmp_path / f"p{i}"
+        d.mkdir()
+        dirs.append(str(d))
+    t0 = runner.start("sıfır", dirs[0])
+    t1 = runner.start("bir", dirs[1])
+    t2 = runner.start("iki", dirs[2])
+    assert len({t0.task_id, t1.task_id, t2.task_id}) == 3
+    assert [t.task_id for t in runner.running] == [t0.task_id, t1.task_id, t2.task_id]
+    with pytest.raises(MacBusy, match=BUSY):
+        runner.start("üç", dirs[0])
+    await asyncio.sleep(0.05)
+    assert len(procs) == 3
+    # finish t1 normally through its own process (result event)
+    procs[1].stdout.feed(result_line("bir bitti."))
+    assert await t1.wait(5)
+    assert t1.status == DONE and t1.result == "bir bitti."
+    assert t0.status == RUNNING and t2.status == RUNNING
+    assert [t.task_id for t in runner.running] == [t0.task_id, t2.task_id]
+    # stop only t2
+    assert await runner.stop(t2.task_id)
+    assert t2.status == STOPPED and t0.status == RUNNING
+    assert procs[2].terminated and not procs[0].terminated
+    # a slot is free again
+    t3 = runner.start("üç", dirs[1])
+    assert runner.busy and len(runner.running) == 2
+    assert await runner.stop()  # no id: stop everything
+    assert t0.status == STOPPED and t3.status == STOPPED and not runner.busy
+    kinds = [k for k, *_ in events]
+    assert kinds.count("start") == 4 and kinds.count("done") == 4
+
+
+async def test_write_tasks_in_same_cwd_conflict(tmp_path):
+    runner, _ = make_runner(tmp_path, lambda: FakeClaude([init_line()], hold=True), max_parallel=3)
+    t = runner.start("README düzelt", str(tmp_path))
+    assert t.access == WRITE
+    with pytest.raises(MacConflict) as ei:
+        runner.start("core.py düzelt", str(tmp_path))
+    assert ei.value.task is t and CONFLICT in str(ei.value)
+    assert isinstance(ei.value, MacBusy)
+    # readers never conflict; a writer in another folder neither
+    r = runner.start("ls", str(tmp_path), access=READ)
+    assert r.access == READ
+    (tmp_path / "x").mkdir()
+    w = runner.start("x düzelt", str(tmp_path / "x"))
+    assert len(runner.running) == 3
+    with pytest.raises(ValueError, match="access"):
+        runner.start("x", access="rw")
+    await runner.stop(t.task_id)
+    t2 = runner.start("core.py düzelt", str(tmp_path))  # writer gone → free
+    assert t2.status == RUNNING
+    await runner.stop()

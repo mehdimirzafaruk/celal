@@ -46,7 +46,7 @@ async def test_requires_bearer_token(api):
 async def test_task_runs_and_reports(api, tmp_path):
     server, client, runner, spawner, hold, seen = api
     r = await client.get("/health", headers=auth())
-    assert r.json() == {"ok": True, "busy": False}
+    assert r.json() == {"ok": True, "busy": False, "running": 0, "max_parallel": 3}
     r = await client.post("/task", json={"task": "uname -a çalıştır"}, headers=auth())
     assert r.status_code == 202
     task_id = r.json()["task_id"]
@@ -67,8 +67,8 @@ async def test_busy_bad_input_and_unknown(api, tmp_path):
     hold["on"] = True
     r = await client.post("/task", json={"task": "uzun iş"}, headers=auth())
     assert r.status_code == 202
-    r = await client.post("/task", json={"task": "ikinci"}, headers=auth())
-    assert r.status_code == 409 and r.json()["error"] == BUSY
+    r = await client.post("/task", json={"task": "ikinci"}, headers=auth())  # writer in the same (default) cwd
+    assert r.status_code == 409 and "aynı klasörde" in r.json()["error"]
     await runner.stop()
     assert (await client.post("/task", content=b"{bozuk", headers=auth())).status_code == 400
     assert (await client.post("/task", json={"task": "  "}, headers=auth())).status_code == 400
@@ -88,3 +88,79 @@ def test_token_file_created_private_and_stable(tmp_path):
     path.chmod(0o644)
     ensure_token(path)
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+async def test_two_tasks_run_concurrently_with_separate_state(api, tmp_path):
+    """Two POST /task calls while the first is still running → both 202, both running, independent."""
+    server, client, runner, spawner, hold, seen = api
+    hold["on"] = True
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    r1 = await client.post("/task", json={"task": "birinci", "cwd": str(tmp_path / "a")}, headers=auth())
+    assert r1.status_code == 202, r1.text
+    r2 = await client.post("/task", json={"task": "ikinci", "cwd": str(tmp_path / "b")}, headers=auth())
+    assert r2.status_code == 202, r2.text  # was 409 with the single-task lock
+    id1, id2 = r1.json()["task_id"], r2.json()["task_id"]
+    assert id1 != id2
+    h = (await client.get("/health", headers=auth())).json()
+    assert h["busy"] is True and h["running"] == 2
+    b1 = (await client.get(f"/task/{id1}", headers=auth())).json()
+    b2 = (await client.get(f"/task/{id2}", headers=auth())).json()
+    assert b1["status"] == "running" and b2["status"] == "running"
+    assert b1["task"] == "birinci" and b2["task"] == "ikinci"
+    assert b1["cwd"] != b2["cwd"]
+    # stopping one does not touch the other
+    assert await runner.stop(id1)
+    b1 = (await client.get(f"/task/{id1}", headers=auth())).json()
+    b2 = (await client.get(f"/task/{id2}", headers=auth())).json()
+    assert b1["status"] == "stopped" and b2["status"] == "running"
+    assert len(seen) == 2 and {d["task_id"] for d in seen} == {id1, id2}
+
+
+async def test_read_only_tasks_share_a_cwd_but_writers_do_not(api, tmp_path):
+    server, client, runner, spawner, hold, seen = api
+    hold["on"] = True
+    cwd = str(tmp_path)
+    r1 = await client.post("/task", json={"task": "ekran görüntüsü al", "cwd": cwd, "access": "read"}, headers=auth())
+    r2 = await client.post("/task", json={"task": "dosyaları listele", "cwd": cwd, "access": "read"}, headers=auth())
+    assert (r1.status_code, r2.status_code) == (202, 202)
+    assert r1.json()["access"] == "read"
+    # a writer (default access) in the same folder is fine next to readers
+    r3 = await client.post("/task", json={"task": "README düzelt", "cwd": cwd}, headers=auth())
+    assert r3.status_code == 202 and r3.json()["access"] == "write"
+    await runner.stop(r1.json()["task_id"])  # free a slot (limit is 3 by default)
+    # a second writer in the same folder is refused, naming the running writer
+    r4 = await client.post("/task", json={"task": "core.py düzelt", "cwd": cwd}, headers=auth())
+    assert r4.status_code == 409
+    assert r4.json()["conflict_task_id"] == r3.json()["task_id"]
+    assert "aynı klasörde" in r4.json()["error"]
+    # same folder spelled differently ("~"-style / trailing slash) is still the same folder
+    r5 = await client.post("/task", json={"task": "x", "cwd": cwd + "/"}, headers=auth())
+    assert r5.status_code == 409
+    # another folder is fine
+    (tmp_path / "other").mkdir()
+    r6 = await client.post("/task", json={"task": "x", "cwd": str(tmp_path / "other")}, headers=auth())
+    assert r6.status_code == 202
+    assert (await client.post("/task", json={"task": "x", "access": "rw"}, headers=auth())).status_code == 400
+    # once the writer is done, the folder is free again
+    await runner.stop(r3.json()["task_id"])
+    r7 = await client.post("/task", json={"task": "core.py düzelt", "cwd": cwd}, headers=auth())
+    assert r7.status_code == 202
+
+
+async def test_parallel_limit_returns_409_with_running_ids(api, tmp_path):
+    server, client, runner, spawner, hold, seen = api
+    hold["on"] = True
+    runner.max_parallel = 2
+    ids = []
+    for i in range(2):
+        d = tmp_path / f"d{i}"
+        d.mkdir()
+        r = await client.post("/task", json={"task": f"iş {i}", "cwd": str(d)}, headers=auth())
+        assert r.status_code == 202
+        ids.append(r.json()["task_id"])
+    r = await client.post("/task", json={"task": "fazla"}, headers=auth())
+    assert r.status_code == 409 and r.json()["error"] == BUSY
+    assert r.json()["running_task_id"] in ids  # old field stays for Hermes
+    assert sorted(r.json()["running_task_ids"]) == sorted(ids)
+    assert (await client.get("/health", headers=auth())).json()["max_parallel"] == 2

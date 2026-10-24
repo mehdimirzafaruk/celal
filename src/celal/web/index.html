@@ -23,6 +23,7 @@
   .pill.bad .dot { background: var(--bad); } .pill.bad { color: var(--bad); border-color: #5a2626; }
   #state { margin-left: auto; }
   #state.listening { color: var(--ok); } #state.thinking { color: var(--warn); } #state.speaking { color: var(--accent); }
+  #state.waiting { color: var(--muted); } #state.waiting .dot { background: var(--muted); animation: pulse 2s infinite; }
   #state.thinking .dot { background: var(--warn); animation: pulse 1s infinite; }
   #state.speaking .dot { background: var(--accent); animation: pulse .6s infinite; }
   #state.listening .dot { background: var(--ok); }
@@ -50,6 +51,8 @@
   button.mic .rec { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
   button.mic.on { background: #3a1416; border-color: var(--bad); color: #ffd7d7; }
   button.mic.on .rec { background: var(--bad); box-shadow: 0 0 0 3px rgba(255,93,93,.25); animation: pulse 1.2s infinite; }
+  button.mic.on.passive { background: #2a2416; border-color: var(--warn); color: #ffe9b0; }
+  button.mic.on.passive .rec { background: var(--warn); box-shadow: 0 0 0 3px rgba(255,200,80,.2); animation: pulse 2s infinite; }
   button.stop { background: #3a1d1d; border-color: #6b2b2b; color: #ffcaca; font-weight: 600; }
   button.stop:hover { border-color: var(--bad); }
   .hint { font-size: 11px; color: var(--muted); margin-left: auto; align-self: center; }
@@ -95,7 +98,13 @@
   let micOn = false;
   let macMode = false;
   let hotkey = "";
-  const STATE_CLASS = { "dinliyor": "listening", "düşünüyor": "thinking", "konuşuyor": "speaking" };
+  const STATE_CLASS = { "bekliyor": "waiting", "dinliyor": "listening", "düşünüyor": "thinking", "konuşuyor": "speaking" };
+  let wake = { on: false, active: true, start: "", stop: "" };
+  function micHint() {
+    if (!micOn) return "Mikrofon kapalı" + (hotkey ? " · " + hotkey : "");
+    const cmd = wake.on ? (wake.active ? " · “" + wake.stop + "” kapatır" : " · bekliyor: “" + wake.start + "” de") : "";
+    return "Mikrofon AÇIK" + cmd + (hotkey ? " · " + hotkey : "");
+  }
 
   function atBottom() { return log.scrollHeight - log.scrollTop - log.clientHeight < 60; }
   function add(el) { const stick = atBottom(); const e = $("empty"); if (e) e.remove(); log.appendChild(el); if (stick) log.scrollTop = log.scrollHeight; }
@@ -115,13 +124,18 @@
     $("state-text").textContent = s.state;
     $("reason").textContent = (s.connected ? "Hermes: " : "Hermes: ") + s.reason + "  ·  tünel: " + s.tunnel;
     micOn = !!s.mic; const mic = $("mic");
-    mic.classList.toggle("on", micOn); $("mic-text").textContent = micOn ? "Dinliyor" : "Dinle";
+    if (s.wake) wake = s.wake;
+    const passive = micOn && wake.on && !wake.active;
+    mic.classList.toggle("on", micOn); mic.classList.toggle("passive", passive);
+    $("mic-text").textContent = micOn ? (passive ? "Bekliyor" : "Dinliyor") : "Dinle";
     mic.disabled = !s.voice;
-    $("hint").textContent = (micOn ? "Mikrofon AÇIK" : "Mikrofon kapalı") + (hotkey ? " · " + hotkey : "");
+    $("hint").textContent = micHint();
     const mac = s.mac || {};
     macMode = !!mac.mode; $("macmode").classList.toggle("on", macMode);
     $("macpill").classList.toggle("on", !!mac.busy);
-    $("macpill").title = mac.busy ? "Mac'te çalışıyor: " + mac.task : "";
+    const macTasks = mac.tasks || [];
+    $("macpill").lastChild.textContent = macTasks.length > 1 ? "Mac ×" + macTasks.length : "Mac";
+    $("macpill").title = mac.busy ? "Mac'te çalışıyor:\n" + macTasks.map(t => "• " + t.task).join("\n") : "";
     $("input").placeholder = macMode ? "Mac'te çalıştırılacak görev… (Claude Code, izinsiz mod)" : "Celal'e yaz… (Enter gönderir, Shift+Enter satır)";
   }
 
@@ -157,7 +171,8 @@
       case "mac": macEvent(ev); break;
       case "error": note(ev.text, "err"); break;
       case "info": note(ev.text); break;
-      case "hotkey": hotkey = ev.spec; $("hint").textContent = (micOn ? "Mikrofon AÇIK" : "Mikrofon kapalı") + " · " + hotkey; break;
+      case "wake": note(ev.text); break;
+      case "hotkey": hotkey = ev.spec; $("hint").textContent = micHint(); break;
     }
     return true;
   };

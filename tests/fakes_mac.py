@@ -26,19 +26,31 @@ class FakeStream:
         self._delay = delay
         self._hold = hold  # keep the stream open after the last line (until closed)
         self.closed = asyncio.Event()
+        self._more = asyncio.Event()
+
+    def feed(self, line):
+        """Append a line to a held stream (wakes a pending readline)."""
+        self._lines.append((json.dumps(line, ensure_ascii=False) + "\n").encode() if isinstance(line, dict) else line)
+        self._more.set()
 
     async def readline(self):
-        if self._lines:
-            if self._delay:
-                try:
-                    await asyncio.wait_for(self.closed.wait(), self._delay)
-                    return b""
-                except TimeoutError:
-                    pass
-            return self._lines.pop(0)
-        if self._hold:
-            await self.closed.wait()
-        return b""
+        while True:
+            if self._lines:
+                if self._delay:
+                    try:
+                        await asyncio.wait_for(self.closed.wait(), self._delay)
+                        return b""
+                    except TimeoutError:
+                        pass
+                return self._lines.pop(0)
+            if not self._hold or self.closed.is_set():
+                return b""
+            self._more.clear()
+            closed = asyncio.ensure_future(self.closed.wait())
+            more = asyncio.ensure_future(self._more.wait())
+            await asyncio.wait({closed, more}, return_when=asyncio.FIRST_COMPLETED)
+            for f in (closed, more):
+                f.cancel()
 
 
 class FakeErr:

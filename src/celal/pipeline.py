@@ -45,6 +45,7 @@ from celal.stt_filter import WhisperHallucinationFilter
 from celal.timing import TurnTimer, TurnTimingObserver
 from celal.tts_ema import EMALightningTTSService
 from celal.tts_say import SayTTSService
+from celal.wake import ListenState, VoiceCommandGate
 
 IN_RATE = 16000
 OUT_RATE = 24000
@@ -71,6 +72,9 @@ class Config:
     input_wav: str | None = None
     input_wav_tail_secs: float = 8.0
     mic_on_start: bool = False  # mic stays closed until the user opens it
+    # True: an open mic starts passive; only "Celal dinlemeye başla" makes Celal
+    # listen, "Celal dinlemeyi durdur" makes it passive again (celal.wake).
+    wake: bool = True
     printer: Callable[[str], None] = field(default=print)
     print_sentences: bool = True
 
@@ -172,6 +176,7 @@ class Built:
     reply: ReplyTracker
     user_aggregator: object
     window: SpeakingWindow | None = None
+    listen: ListenState | None = None  # voice commands gate (None: always listening)
 
 
 def _worker(pipeline: Pipeline, observers: list[BaseObserver]) -> PipelineWorker:
@@ -193,8 +198,9 @@ def build_voice(
     llm: HermesLLMService,
     observers: list[BaseObserver] | None = None,
     mac_route: Callable[[str], bool] | None = None,
+    listen: ListenState | None = None,
 ) -> Built:
-    """Mic → Silero VAD + Smart Turn v3 → Whisper (tr) → Hermes → TTS → speaker."""
+    """Mic → Silero VAD + Smart Turn v3 → Whisper (tr) → [voice commands] → Hermes → TTS → speaker."""
     transport = SoundDeviceTransport(
         SoundDeviceTransportParams(
             audio_in_enabled=True,
@@ -231,6 +237,7 @@ def build_voice(
             stt,
             *gate_stt,
             WhisperHallucinationFilter(),
+            *([VoiceCommandGate(listen)] if listen is not None else []),
             *([MacRouter(mac_route)] if mac_route else []),
             aggregators.user(),
             llm,
@@ -242,8 +249,10 @@ def build_voice(
     timer = TurnTimer(emit=cfg.printer)
     reply = ReplyTracker()
     worker = _worker(pipeline, [TurnTimingObserver(timer), reply, *(observers or [])])
-    logger.debug(f"voice pipeline: stt={STT_MODELS[cfg.stt]} tts={cfg.tts} barge_in={cfg.barge_in}")
-    return Built(worker, transport, llm, tts, timer, reply, aggregators.user(), window)
+    logger.debug(
+        f"voice pipeline: stt={STT_MODELS[cfg.stt]} tts={cfg.tts} barge_in={cfg.barge_in} wake={listen is not None}"
+    )
+    return Built(worker, transport, llm, tts, timer, reply, aggregators.user(), window, listen)
 
 
 def build_text(cfg: Config, llm: HermesLLMService, observers: list[BaseObserver] | None = None) -> Built:

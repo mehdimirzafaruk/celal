@@ -13,8 +13,13 @@ subscription) apply as usual. Tool-use events become short Turkish progress
 lines; the final result is kept in full and a 1-2 sentence spoken summary is
 made locally (no second model call).
 
-Only one task runs at a time. :meth:`MacTaskRunner.stop` kills the whole
-process group (claude and whatever it started).
+Up to ``max_parallel`` tasks (``[mac] max_parallel``, default 3) run at the
+same time, each with its own id, process, progress and result. Each task
+declares ``access``: ``read`` (screenshots, listing, questions) or ``write``
+(the default: it may change files). Two ``write`` tasks in the same working
+directory are refused (:class:`MacConflict`) so two Claudes never edit the same
+tree at once; readers never conflict. :meth:`MacTaskRunner.stop` kills one
+task's whole process group (claude and whatever it started), or all of them.
 """
 
 from __future__ import annotations
@@ -35,7 +40,12 @@ from loguru import logger
 
 from celal.speech_text import clean_for_speech
 
-BUSY = "Mac'te bir iş zaten çalışıyor"
+BUSY = "Mac'te aynı anda çalışan iş sınırı doldu"
+CONFLICT = "aynı klasörde değişiklik yapan bir Mac işi zaten çalışıyor"
+DEFAULT_MAX_PARALLEL = 3
+READ = "read"
+WRITE = "write"
+ACCESS = (READ, WRITE)
 APPEND_PROMPT = (
     "Bu görev Celal sesli asistanından geldi (Mac'te yap). Sonucu düz Türkçe yaz; "
     "ilk iki cümle sesli okunacak, en önemli bilgiyi (sonuç, sayı, hata) başa koy."
@@ -49,7 +59,20 @@ STOPPED = "stopped"
 
 
 class MacBusy(RuntimeError):
-    """A Mac task is already running."""
+    """No free slot: ``max_parallel`` Mac tasks are already running."""
+
+
+class MacConflict(MacBusy):
+    """A ``write`` task is already running in the same working directory."""
+
+    def __init__(self, task: "MacTask"):
+        super().__init__(CONFLICT)
+        self.task = task
+
+
+def same_dir(a: str, b: str) -> bool:
+    """True when two paths name the same directory (symlinks, ``..`` and trailing slashes resolved)."""
+    return os.path.realpath(os.path.expanduser(a)) == os.path.realpath(os.path.expanduser(b))
 
 
 # ---- parsing ---------------------------------------------------------------
@@ -231,6 +254,7 @@ class MacTask:
     task: str
     cwd: str
     source: str  # "celal" (window/terminal) | "hermes"
+    access: str = WRITE  # "read" | "write": writers lock their cwd against other writers
     status: str = RUNNING
     progress: list[str] = field(default_factory=list)
     result: str = ""
@@ -240,6 +264,9 @@ class MacTask:
     seconds: float | None = None
     num_turns: int | None = None
     _done: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    _proc: object = field(default=None, repr=False)
+    _worker: asyncio.Task | None = field(default=None, repr=False)
+    _stopping: bool = field(default=False, repr=False)
 
     @property
     def finished(self) -> bool:
@@ -259,6 +286,7 @@ class MacTask:
             "task": self.task,
             "cwd": self.cwd,
             "source": self.source,
+            "access": self.access,
             "progress": self.progress[-20:],
             "result": self.result,
             "error": self.error,
@@ -269,7 +297,7 @@ class MacTask:
 
 
 class MacTaskRunner:
-    """Runs one ``claude -p`` at a time and reports what it does.
+    """Runs up to ``max_parallel`` ``claude -p`` processes and reports what they do.
 
     ``on_event(kind, task)`` with kind ``start`` / ``progress`` (new line in
     ``task.progress``) / ``done`` is called on the event loop.
@@ -285,6 +313,7 @@ class MacTaskRunner:
         spawn=default_spawn,
         env: dict[str, str] | None = None,
         keep: int = 20,
+        max_parallel: int = DEFAULT_MAX_PARALLEL,
     ):
         self.claude = claude
         self.default_cwd = default_cwd
@@ -292,16 +321,24 @@ class MacTaskRunner:
         self._on_event = on_event
         self._spawn = spawn
         self._env = env
-        self._keep = keep
+        self._keep = max(keep, max_parallel)
+        self.max_parallel = max(1, int(max_parallel))
         self.tasks: dict[str, MacTask] = {}
-        self.current: MacTask | None = None
-        self._proc = None
-        self._runner: asyncio.Task | None = None
-        self._stopping = False
+
+    @property
+    def running(self) -> list[MacTask]:
+        """Unfinished tasks, oldest first."""
+        return [t for t in self.tasks.values() if not t.finished]
+
+    @property
+    def current(self) -> MacTask | None:
+        """The oldest running task (None when idle); kept for status displays."""
+        running = self.running
+        return running[0] if running else None
 
     @property
     def busy(self) -> bool:
-        return self.current is not None and not self.current.finished
+        return any(not t.finished for t in self.tasks.values())
 
     def get(self, task_id: str) -> MacTask | None:
         return self.tasks.get(task_id)
@@ -319,27 +356,40 @@ class MacTaskRunner:
         task.progress.append(line)
         self._emit("progress", task)
 
-    def start(self, task: str, cwd: str | None = None, source: str = "celal") -> MacTask:
-        """Start a task in the background; raises :class:`MacBusy` or ``ValueError``."""
+    def conflict(self, cwd: str, access: str = WRITE) -> MacTask | None:
+        """The running writer that blocks a ``write`` task in ``cwd``, if any."""
+        if access != WRITE:
+            return None
+        for r in self.running:
+            if r.access == WRITE and same_dir(r.cwd, cwd):
+                return r
+        return None
+
+    def start(self, task: str, cwd: str | None = None, source: str = "celal", access: str = WRITE) -> MacTask:
+        """Start a task in the background.
+
+        Raises ``ValueError`` (bad input), :class:`MacBusy` (all ``max_parallel``
+        slots taken) or :class:`MacConflict` (a writer already runs in ``cwd``).
+        """
         task = (task or "").strip()
         if not task:
             raise ValueError("görev boş")
-        if self.busy:
-            raise MacBusy(BUSY)
+        if access not in ACCESS:
+            raise ValueError(f"access 'read' ya da 'write' olmalı, '{access}' geldi")
         workdir = os.path.expanduser(cwd or self.default_cwd)
         if not os.path.isdir(workdir):
             raise ValueError(f"çalışma klasörü yok: {workdir}")
-        t = MacTask(task_id=uuid.uuid4().hex[:10], task=task, cwd=workdir, source=source)
+        if len(self.running) >= self.max_parallel:
+            raise MacBusy(BUSY)
+        blocker = self.conflict(workdir, access)
+        if blocker is not None:
+            raise MacConflict(blocker)
+        t = MacTask(task_id=uuid.uuid4().hex[:10], task=task, cwd=workdir, source=source, access=access)
         self.tasks[t.task_id] = t
-        while len(self.tasks) > self._keep:
-            oldest = next(iter(self.tasks))
-            if self.tasks[oldest] is t or not self.tasks[oldest].finished:
-                break
-            del self.tasks[oldest]
-        self.current = t
-        self._stopping = False
+        for old_id in [k for k, v in self.tasks.items() if v.finished][: max(0, len(self.tasks) - self._keep)]:
+            del self.tasks[old_id]
         self._emit("start", t)
-        self._runner = asyncio.create_task(self._run(t), name=f"mac-task-{t.task_id}")
+        t._worker = asyncio.create_task(self._run(t), name=f"mac-task-{t.task_id}")
         return t
 
     async def _run(self, t: MacTask) -> None:
@@ -352,8 +402,8 @@ class MacTaskRunner:
         except Exception as e:  # noqa: BLE001
             self._finish(t, FAILED, error=f"claude başlatılamadı: {e}")
             return
-        self._proc = proc
-        if self._stopping:  # Durdur came while claude was being started
+        t._proc = proc
+        if t._stopping:  # Durdur came while claude was being started
             await _kill_group(proc)
         stderr_task = asyncio.create_task(_read_all(proc.stderr))
         got_result = False
@@ -380,9 +430,9 @@ class MacTaskRunner:
             self._finish(t, FAILED, error=f"claude çıktısı okunamadı: {e}")
             return
         finally:
-            self._proc = None
+            t._proc = None
         err = await stderr_task
-        if self._stopping:
+        if t._stopping:
             self._finish(t, STOPPED, error="durduruldu")
         elif t.finished:
             pass  # _handle_line already finished it (result event)
@@ -434,28 +484,32 @@ class MacTaskRunner:
         else:
             t.summary = f"Mac'teki iş başarısız: {spoken_summary(error, 1, 160)}"
         t._done.set()
-        if self.current is t:
-            self.current = None
         self._emit("done", t)
 
-    async def stop(self) -> bool:
-        """Kill the running claude (and its process group). True if one was running."""
-        t, proc = self.current, self._proc
-        if t is None or t.finished:
+    async def stop(self, task_id: str | None = None) -> bool:
+        """Kill one running task (its whole process group), or all of them when ``task_id`` is None.
+
+        True if at least one task was running.
+        """
+        targets = [t for t in self.running if task_id is None or t.task_id == task_id]
+        if not targets:
             return False
-        self._stopping = True
-        if proc is not None:
-            await _kill_group(proc)
-        # else: _run kills it right after spawning (no cancel: it could orphan the child)
-        await t.wait(5)
-        if not t.finished:
-            self._finish(t, STOPPED, error="durduruldu")
+        for t in targets:
+            t._stopping = True
+            if t._proc is not None:
+                await _kill_group(t._proc)
+            # else: _run kills it right after spawning (no cancel: it could orphan the child)
+        await asyncio.gather(*(t.wait(5) for t in targets))
+        for t in targets:
+            if not t.finished:
+                self._finish(t, STOPPED, error="durduruldu")
         return True
 
     async def shutdown(self) -> None:
         await self.stop()
-        if self._runner is not None and not self._runner.done():
-            self._runner.cancel()
+        for t in self.tasks.values():
+            if t._worker is not None and not t._worker.done():
+                t._worker.cancel()
 
 
 async def _lines(stream):

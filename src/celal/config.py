@@ -23,6 +23,7 @@ Example ``~/.config/celal/config.toml``::
     cwd = "~"                  # varsayılan çalışma klasörü
     claude = "claude"          # yol ya da PATH'teki ad (~/.local/bin de aranır)
     timeout = 1800             # saniye
+    max_parallel = 3           # aynı anda en çok kaç Mac işi çalışır
     api = true                 # Hermes → Mac yerel API'si (127.0.0.1:api_port)
     api_port = 8643
 """
@@ -61,6 +62,7 @@ class Settings:
     mac_cwd: str = "~"
     mac_claude: str = "claude"
     mac_timeout: float = 1800.0
+    mac_max_parallel: int = 3  # concurrent "claude -p" tasks (never below 1)
     mac_api: bool = True  # local HTTP API for Hermes (reached through ssh -R)
     mac_api_port: int = 8643
     mac_api_key_file: str = str(CONFIG_DIR / "mac-api-key")
@@ -106,6 +108,9 @@ def load_settings(env: Mapping[str, str] | None = None, config_path: str | Path 
     s.mac_cwd = env.get("CELAL_MAC_CWD") or mac.get("cwd") or s.mac_cwd
     s.mac_claude = env.get("CELAL_CLAUDE") or mac.get("claude") or s.mac_claude
     s.mac_timeout = float(env.get("CELAL_MAC_TIMEOUT") or mac.get("timeout") or s.mac_timeout)
+    raw_parallel = env.get("CELAL_MAC_MAX_PARALLEL") or mac.get("max_parallel")
+    if raw_parallel is not None and str(raw_parallel).strip() != "":
+        s.mac_max_parallel = max(1, int(raw_parallel))
     if "CELAL_MAC_API" in env:
         s.mac_api = _bool(env["CELAL_MAC_API"])
     elif "api" in mac:

@@ -20,6 +20,18 @@ duyup susmaz. Konuşurken araya girmek istersen `--barge-in` (kulaklıkla kullan
 Dinlerken düğme kırmızıdır, kırmızı nokta yanıp söner, menü çubuğunda `⏺` görünür.
 Odadaki video/TV sesi de konuşma sayılır; işin bitince mikrofonu kapat.
 
+**Açık mikrofon "Hey Siri" gibi bekler.** Mikrofon açılınca Celal pasiftir (durum `bekliyor`,
+düğme sarı, menü çubuğunda `◌`): Whisper yerelde çalışır ama duyduğu hiçbir şey Hermes'e ya da
+Mac'e gitmez. Yalnız şu iki cümle tam olarak söylenince durum değişir:
+
+- **"Celal dinlemeye başla"** → aktif dinleme (`dinliyor`, `⏺`); artık her söz Celal'e gider.
+- **"Celal dinlemeyi durdur"** → yeniden pasif. İki cümle de Hermes'e mesaj olarak gitmez.
+
+Büyük/küçük harf, baştaki/sondaki noktalama ("Celal, dinlemeye başla.") ve boşluk fark etmez;
+fazladan ya da eksik kelime, benzer cümleler ("Celal dinlemeye başlasana") tetiklemez.
+Mikrofonu düğmeyle kapatıp açınca yine pasif başlar. Eski davranış (açık mikrofon = hep dinle)
+için `--no-wake`.
+
 ## Kurulum
 
 Gereken: Apple Silicon Mac, Python 3.12 (uv kurar), [uv](https://docs.astral.sh/uv/),
@@ -192,8 +204,16 @@ echo "Mac'te ~/Kod/celal içindeki testleri çalıştır ve kaç test geçtiğin
 - Claude'un araç adımları pencerede kısa satırlar olarak akar ("dosya okuyor: core.py",
   "komut çalıştırıyor: pytest"). Bitince tam sonuç pencerede görünür, ilk iki cümlesi sesli okunur
   (yerelde kesilir, ikinci bir model çağrısı yok).
-- Aynı anda tek Mac işi çalışır; ikinci istek "Mac'te bir iş zaten çalışıyor" alır.
-- **Durdur** (Esc, menüdeki Durdur) çalışan `claude` sürecini ve başlattığı her şeyi (süreç grubu) öldürür.
+- Aynı anda en çok 3 Mac işi çalışır (`[mac] max_parallel`, `CELAL_MAC_MAX_PARALLEL`); her işin kendi
+  `task_id`'si, süreci, adım satırları ve sonucu vardır, birinin bitmesi ya da durması ötekini etkilemez.
+  Sınır dolunca yeni istek "Mac'te aynı anda çalışan iş sınırı doldu" alır (API: 409, `running_task_ids`).
+- Her iş `access` taşır: `read` (ekran görüntüsü, listeleme, soru) ya da `write` (varsayılan: dosya
+  değiştirebilir). Aynı çalışma klasöründe ikinci bir `write` işi reddedilir (API: 409,
+  `conflict_task_id`; pencerede "aynı klasörde değişiklik yapan bir Mac işi zaten çalışıyor"), iki
+  Claude aynı ağacı aynı anda düzenlemesin diye. `read` işler hiç çakışmaz; farklı klasörlerdeki
+  `write` işler yan yana çalışır. Pencereden gelen "Mac'te …" istekleri `write` sayılır.
+- **Durdur** (Esc, menüdeki Durdur) çalışan bütün `claude` süreçlerini ve başlattıkları her şeyi (süreç
+  grupları) öldürür; API tarafında `MacTaskRunner.stop(task_id)` tek işi durdurur.
 - Hermes'ten gelen işler (Telegram ya da Celal sohbeti üzerinden `mac_task`) pencerede
   "Hermes Mac'te iş başlattı" diye görünür; sonucu Hermes iletir, Mac sesli okumaz.
   Celal kapalıysa Hermes "Mac bağlı değil (Celal açık değil)" cevabını alır.

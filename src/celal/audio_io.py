@@ -138,6 +138,11 @@ class WavFileInputTransport(BaseInputTransport):
         super().__init__(params)
         self._feed_task: asyncio.Task | None = None
         self.finished = asyncio.Event()
+        self.capturing = params.capture_on_start
+
+    def set_capturing(self, on: bool) -> None:
+        """Mic button in headless runs: only the flag changes, the file keeps playing."""
+        self.capturing = on
 
     async def start(self, frame: StartFrame):
         await super().start(frame)

@@ -45,6 +45,8 @@ async def _run_text(settings, cfg, args) -> int:
             print(f"[bilgi] {ev['text']}", flush=True)
         elif kind == "user" and ev.get("source") == "mic":
             print(f"[sen (ses)] {ev['text']}", flush=True)
+        elif kind == "wake":
+            print(f"[dinleme] {'aktif' if ev.get('active') else 'pasif'}: {ev['text']}", flush=True)
         elif kind == "mac":
             phase = ev.get("phase")
             if phase == "start":
@@ -79,6 +81,10 @@ async def _run_text(settings, cfg, args) -> int:
             print(f"[hata] Hermes'e bağlanılamadı: {core.reason} (tünel: {core.tunnel.status} {core.tunnel.detail})", flush=True)
         if core.mac_api is not None:
             print(f"Mac API: {core.mac_api_status} (Hermes → Mac, ters tünel ayrı ssh ile)", flush=True)
+        if voice and cfg.wake:
+            from celal.wake import START_PHRASE, STOP_PHRASE
+
+            print(f"Mikrofon açık, dinleme pasif: “{START_PHRASE}” deyince dinler, “{STOP_PHRASE}” deyince durur.", flush=True)
         interactive = sys.stdin.isatty()
         lines = _stdin_lines()
         while True:
@@ -166,6 +172,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--min-words", type=int, default=0, help="--barge-in ile: 0 sesini duyunca sus, N kelimeden sonra sus")
     parser.add_argument("--mic", action="store_true", help="mikrofon açık başlasın (pencere; --text ile terminalde de dinler)")
+    parser.add_argument(
+        "--no-wake",
+        action="store_true",
+        help="sesli komut kapısı olmasın: mikrofon açıkken her söz Celal'e gider "
+        "(varsayılan: “Celal dinlemeye başla” / “Celal dinlemeyi durdur” ile aç/kapat)",
+    )
     parser.add_argument("--out", help="çalınan sesi WAV olarak da yaz")
     parser.add_argument("--no-play", action="store_true", help="hoparlöre çalma")
     parser.add_argument("--no-menubar", action="store_true", help="menü çubuğu simgesi olmasın")
@@ -205,6 +217,7 @@ def main(argv: list[str] | None = None) -> int:
         play=not args.no_play,
         record_path=args.out,
         mic_on_start=args.mic,
+        wake=not args.no_wake,
     )
     try:
         if args.text:

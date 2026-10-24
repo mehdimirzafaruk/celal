@@ -143,6 +143,16 @@ class MenuBar:
             self._proc.kill()
 
 
+def menubar_title(ev: dict) -> str:
+    """'● Celal ⏺' listening, '● Celal ◌' mic open but passive (voice commands), '○' not connected."""
+    mark = "●" if ev.get("connected") else "○"
+    if not ev.get("mic"):
+        return f"{mark} Celal"
+    wake = ev.get("wake") or {}
+    passive = wake.get("on") and not wake.get("active")
+    return f"{mark} Celal {'◌' if passive else '⏺'}"
+
+
 def _set_app_name(name: str) -> None:
     try:
         from Foundation import NSBundle
@@ -236,11 +246,7 @@ def run_window(settings: Settings, cfg: Config, *, debug: bool = False, menubar:
     if menubar:
         bar.start()
 
-    def on_status(ev: dict):
-        mark = "●" if ev.get("connected") else "○"
-        bar.set_title(f"{mark} Celal{' ⏺' if ev.get('mic') else ''}")
-
-    bridge.on_status = on_status
+    bridge.on_status = lambda ev: bar.set_title(menubar_title(ev))
 
     def on_closing():
         # Closing the window hides it while the menu bar icon is there to bring it back.

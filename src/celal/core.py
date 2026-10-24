@@ -6,9 +6,11 @@ asyncio loop. The UI talks to it through ``send_text`` / ``set_mic`` /
 ``interrupt`` / ``new_conversation`` and receives plain dict events via
 ``emit``::
 
-    {"type": "status", "state": "hazır|dinliyor|düşünüyor|konuşuyor",
+    {"type": "status", "state": "hazır|bekliyor|dinliyor|düşünüyor|konuşuyor",
      "connected": bool, "conn": "bağlı|bağlı değil", "reason": str,
-     "tunnel": str, "mic": bool, "voice": bool}
+     "tunnel": str, "mic": bool, "voice": bool,
+     "wake": {"on": bool, "active": bool, "start": str, "stop": str}}
+    {"type": "wake", "active": bool, "text": str}   # "Celal dinlemeye başla" / "Celal dinlemeyi durdur" heard
     {"type": "user", "text": str}
     {"type": "assistant_start"} / {"type": "assistant_delta", "text": str} / {"type": "assistant_end"}
     {"type": "tool", "name": str}
@@ -40,19 +42,21 @@ from pipecat.frames.frames import (
     UserStoppedSpeakingFrame,
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
-from pipecat.processors.frame_processor import FrameDirection
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.workers.runner import WorkerRunner
 
 from celal.config import Settings
 from celal.hermes import HermesClient
 from celal.llm_hermes import HermesLLMService
 from celal.mac_api import MacApiServer, ensure_token
-from celal.mac_task import BUSY, MacBusy, MacTask, MacTaskRunner, parse_request, split_cwd
+from celal.mac_task import MacBusy, MacTask, MacTaskRunner, parse_request, split_cwd
 from celal.pipeline import STT_MODELS, Built, Config, build_text, build_voice
 from celal.stt_filter import WhisperHallucinationFilter
 from celal.tunnel import EXTERNAL, OPEN, ReverseTunnel, TunnelManager
+from celal.wake import START_PHRASE, STOP_PHRASE, ListenState, VoiceCommandGate
 
 IDLE = "hazır"
+WAITING = "bekliyor"  # mic open, passive: only "Celal dinlemeye başla" is heard
 LISTENING = "dinliyor"
 THINKING = "düşünüyor"
 SPEAKING = "konuşuyor"
@@ -92,19 +96,21 @@ class _FrameWatcher(BaseObserver):
 
 
 class _TranscriptWatcher(BaseObserver):
-    """Reports what the user said, as it leaves the hallucination filter.
+    """Reports what the user said, as it leaves the hallucination filter (or the voice command gate).
 
     Every push is observed so the filtered text is used, not Whisper's raw
     frame (which observers see first, before the echo gate and the filter).
+    With voice commands on, only what the gate lets through is a user message.
     """
 
-    def __init__(self, core: CelalCore, **kwargs):
+    def __init__(self, core: CelalCore, source: type[FrameProcessor], **kwargs):
         super().__init__(observe_every_push=True, **kwargs)
         self.core = core
+        self.source = source
 
     async def on_push_frame(self, data: FramePushed):
         f = data.frame
-        if not isinstance(f, TranscriptionFrame) or not isinstance(data.source, WhisperHallucinationFilter):
+        if not isinstance(f, TranscriptionFrame) or not isinstance(data.source, self.source):
             return
         c = self.core
         text = f.text.strip()
@@ -146,6 +152,8 @@ class CelalCore:
         self.connected = False
         self.reason = "başlıyor"
         self.mic = voice and cfg.mic_on_start
+        # Voice commands: an open mic starts passive ("bekliyor") until the start phrase.
+        self.listen = ListenState(active=not cfg.wake, on_change=self._on_wake)
         self.state = IDLE
         self.built: Built | None = None
         self.llm: HermesLLMService | None = None
@@ -168,7 +176,10 @@ class CelalCore:
         self._llm_turn: int | None = None  # turn the running reply stream answers
         # "Mac'te yap"
         self.mac = mac_runner or MacTaskRunner(
-            claude=settings.mac_claude, default_cwd=settings.mac_cwd, timeout=settings.mac_timeout
+            claude=settings.mac_claude,
+            default_cwd=settings.mac_cwd,
+            timeout=settings.mac_timeout,
+            max_parallel=settings.mac_max_parallel,
         )
         self.mac._on_event = self._on_mac
         self.mac_mode = False  # window toggle: every message goes to the Mac
@@ -204,10 +215,13 @@ class CelalCore:
             "tunnel": f"{self.tunnel.status}{' — ' + self.tunnel.detail if self.tunnel.detail else ''}",
             "mic": self.mic,
             "voice": self.voice,
+            "wake": {"on": self.cfg.wake, "active": self.listen.active, "start": START_PHRASE, "stop": STOP_PHRASE},
             "conversation": self.client.conversation,
             "mac": {
                 "busy": self.mac.busy,
                 "task": (self.mac.current.task[:80] if self.mac.current else ""),
+                "running": len(self.mac.running),
+                "tasks": [{"task_id": t.task_id, "task": t.task[:80], "source": t.source} for t in self.mac.running],
                 "mode": self.mac_mode,
                 "api": self.mac_api_status,
                 "reverse": (f"{self.reverse.status}" if self.reverse is not None else "kapalı"),
@@ -221,7 +235,7 @@ class CelalCore:
         if self._llm_active or self._awaiting_reply:
             return THINKING
         if self.mic:
-            return LISTENING
+            return LISTENING if self.listen.active else WAITING
         return IDLE
 
     def _refresh(self) -> None:
@@ -234,6 +248,16 @@ class CelalCore:
     def _on_tunnel(self, status: str, detail: str) -> None:
         self._refresh()
 
+    def _on_wake(self, active: bool) -> None:
+        """Voice command heard (pipeline task): tell the UI, never Hermes."""
+        text = (
+            f"Dinleme açık. “{STOP_PHRASE}” deyince kapanır."
+            if active
+            else f"Dinleme kapalı. “{START_PHRASE}” deyince açılır."
+        )
+        self.emit({"type": "wake", "active": active, "text": text})
+        self._refresh()
+
     # ---- turns --------------------------------------------------------
     def _begin_turn(self, prompt: str | None) -> int:
         self._turn += 1
@@ -242,7 +266,7 @@ class CelalCore:
         if self.built is not None:
             self.built.reply.reset()
         self._awaiting_reply = True
-        self._awaiting_since = time.monotonic()
+        self._awaiting_since = self._last_audio = time.monotonic()  # "quiet" is measured from the turn start
         return self._turn
 
     def _finish_turn(self, turn: int | None = None) -> None:
@@ -315,8 +339,8 @@ class CelalCore:
             self.emit({"type": "user", "text": shown or task, "source": "text", "mac": True})
         try:
             t = self.mac.start(task, cwd, source="celal")
-        except MacBusy:
-            self.emit({"type": "error", "text": BUSY})
+        except MacBusy as e:  # slot limit, or a writer already in that folder (MacConflict)
+            self.emit({"type": "error", "text": str(e)})
             return None
         except ValueError as e:
             self.emit({"type": "error", "text": f"Mac'te çalıştırılamadı: {e}"})
@@ -365,8 +389,10 @@ class CelalCore:
         if not self.voice:
             self.built = build_text(cfg, self.llm, observers=[_FrameWatcher(self)])
         else:
-            watchers = [_FrameWatcher(self), _TranscriptWatcher(self)]
-            self.built = build_voice(cfg, self.llm, observers=watchers, mac_route=self._route_spoken)
+            listen = self.listen if cfg.wake else None
+            source = VoiceCommandGate if listen is not None else WhisperHallucinationFilter
+            watchers = [_FrameWatcher(self), _TranscriptWatcher(self, source)]
+            self.built = build_voice(cfg, self.llm, observers=watchers, mac_route=self._route_spoken, listen=listen)
         started = asyncio.Event()
 
         @self.built.worker.event_handler("on_pipeline_started")
@@ -522,10 +548,10 @@ class CelalCore:
         self._refresh()
 
     async def interrupt(self) -> None:
-        """Durdur: stop speaking, cancel the Hermes request, kill a running Mac task."""
+        """Durdur: stop speaking, cancel the Hermes request, kill every running Mac task."""
         await self._interrupt_speech()
         if self.mac.busy:
-            await self.mac.stop()
+            await self.mac.stop()  # all of them: the window has one Durdur button
             self._refresh()
 
     async def send_text(self, text: str, mac: bool | None = None) -> bool:
@@ -570,8 +596,8 @@ class CelalCore:
             self.emit({"type": "error", "text": f"Mikrofon açılamadı: {e}"})
             return
         self.mic = on
-        if on and self._bot_speaking:
-            pass  # speaking continues until the user talks (VAD interrupts)
+        if self.cfg.wake:
+            self.listen.set_active(False)  # every mic open starts passive, like a fresh "Hey Siri"
         self._refresh()
 
     async def new_conversation(self) -> None:

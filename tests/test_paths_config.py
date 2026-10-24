@@ -52,3 +52,8 @@ def test_mac_settings(tmp_path):
     assert (s.mac_prefixes, s.mac_cwd, s.mac_api, s.mac_api_port, s.mac_timeout) == (["Bilgisayar:"], "~/Kod", False, 9643, 60.0)
     s = load_settings(env={"CELAL_MAC_API": "1", "CELAL_MAC_PREFIXES": "a, b"}, config_path=cfg)
     assert s.mac_api is True and s.mac_prefixes == ["a", "b"]
+    assert s.mac_max_parallel == 3  # default
+    cfg.write_text("[mac]\nmax_parallel = 5\n")
+    assert load_settings(env={}, config_path=cfg).mac_max_parallel == 5
+    assert load_settings(env={"CELAL_MAC_MAX_PARALLEL": "2"}, config_path=cfg).mac_max_parallel == 2
+    assert load_settings(env={"CELAL_MAC_MAX_PARALLEL": "0"}, config_path=cfg).mac_max_parallel == 1  # never below 1
