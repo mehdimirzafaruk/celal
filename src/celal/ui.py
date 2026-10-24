@@ -175,7 +175,15 @@ def _set_app_name(name: str) -> None:
         pass
 
 
-def run_window(settings: Settings, cfg: Config, *, debug: bool = False, menubar: bool = True) -> int:
+def run_window(
+    settings: Settings,
+    cfg: Config,
+    *,
+    debug: bool = False,
+    menubar: bool = True,
+    voice: bool = True,
+    notice: str | None = None,
+) -> int:
     import webview
 
     bridge = Bridge()
@@ -188,7 +196,7 @@ def run_window(settings: Settings, cfg: Config, *, debug: bool = False, menubar:
 
     cfg.printer = printer
     cfg.print_sentences = False
-    core = CelalCore(settings, cfg, voice=True, emit=bridge.emit)
+    core = CelalCore(settings, cfg, voice=voice, emit=bridge.emit)
 
     loop = asyncio.new_event_loop()
     started = threading.Event()
@@ -206,6 +214,8 @@ def run_window(settings: Settings, cfg: Config, *, debug: bool = False, menubar:
                 core.emit({"type": "error", "text": f"Celal başlatılamadı: {e}"})
             finally:
                 started.set()
+                if notice:
+                    core.emit({"type": "error", "text": notice})
 
         loop.create_task(boot())
         loop.run_forever()

@@ -235,15 +235,20 @@ def main(argv: list[str] | None = None) -> int:
 
     from celal.paths import ModelDiskMissing, configure_model_storage
 
-    # Window and --mic use Whisper; ema TTS and --bench load models too. Only
-    # "--text --tts say" without a microphone runs without the model disk.
-    needs_models = args.bench or not args.text or args.mic or args.tts == "ema"
+    # Whisper (mic) and --bench need the model disk. Without it the window and
+    # --text still work: typing only, spoken with macOS `say` (no download to
+    # the internal disk).
+    disk_missing: str | None = None
     try:
         configure_model_storage()
     except ModelDiskMissing as e:
-        if needs_models:
+        if args.bench or args.mic:
             print(f"hata: {e}", file=sys.stderr)
             return 2
+        disk_missing = str(e)
+        if args.tts == "ema":
+            args.tts = "say"
+        print(f"uyarı: {e} Ses kapalı, yalnız yazı; okuma macOS sesiyle.", file=sys.stderr)
 
     if args.bench:
         from celal.bench import run_bench
@@ -269,7 +274,12 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_run_text(settings, cfg, args))
         from celal.ui import run_window
 
-        return run_window(settings, cfg, debug=args.debug, menubar=not args.no_menubar)
+        notice = None
+        if disk_missing:
+            notice = ("Model diski takılı değil: mikrofon kapalı, yalnız yazı. Cevapları Mac'in kendi sesi okuyor. "
+                      "Diski takıp Celal'i yeniden açınca ses geri gelir.")
+        return run_window(settings, cfg, debug=args.debug, menubar=not args.no_menubar,
+                          voice=disk_missing is None, notice=notice)
     except KeyboardInterrupt:
         print("\nçıkılıyor", file=sys.stderr)
         return 130
