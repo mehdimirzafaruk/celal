@@ -35,11 +35,13 @@ class Bridge:
             self.on_status(ev)
         self._q.put(ev)
 
-    def mark_ready(self, snapshot: dict) -> list[dict]:
+    def mark_ready(self, snapshot: dict, history: dict | None = None) -> list[dict]:
         with self._lock:
             self._ready = True
             backlog, self._backlog = self._backlog, []
-        return backlog + [snapshot]
+        # State (tab list), history (rebuilds the tab logs), what happened meanwhile, the state again.
+        backlog = [e for e in backlog if e.get("type") not in ("tab_line", "tab_delta", "tab_break")]
+        return [snapshot] + ([history] if history else []) + backlog + [snapshot]
 
     def _pump(self) -> None:
         while True:
@@ -60,22 +62,34 @@ class Bridge:
 
 
 class Api:
-    """Methods callable from the page as ``window.pywebview.api.*``."""
+    """Methods callable from the page as ``window.pywebview.api.*``.
+
+    pywebview runs each call on its own thread; everything is handed to the
+    core loop with :meth:`CelalCore.call` and returns at once.
+    """
 
     def __init__(self, core: CelalCore, bridge: Bridge):
         self._core = core
         self._bridge = bridge
 
     def ready(self):
-        return self._bridge.mark_ready(self._core.snapshot())
+        history = {"type": "history", "tabs": self._core.history()}
+        return self._bridge.mark_ready(self._core.snapshot(), history)
 
-    def send_text(self, text: str, mac: bool = False):
-        # mac=True: the "Mac'te çalıştır" toggle is on; "Mac'te …" prefixes work either way.
-        self._core.call(self._core.send_text(str(text), mac=True if mac else None))
+    def send_text(self, text: str):
+        self._core.call(self._core.send_text(str(text)))
         return True
 
-    def set_mac_mode(self, on: bool):
-        self._core.call(self._core.set_mac_mode(bool(on)))
+    def new_tab(self):
+        self._core.call(self._core.new_tab())
+        return True
+
+    def select_tab(self, tab_id: str):
+        self._core.call(self._core.select_tab(str(tab_id)))
+        return True
+
+    def close_tab(self, tab_id: str):
+        self._core.call(self._core.close_tab(str(tab_id)))
         return True
 
     def set_mic(self, on: bool):
@@ -83,11 +97,8 @@ class Api:
         return True
 
     def interrupt(self):
+        logger.info("Durdur (pencere)")
         self._core.call(self._core.interrupt())
-        return True
-
-    def new_conversation(self):
-        self._core.call(self._core.new_conversation())
         return True
 
 
@@ -232,6 +243,7 @@ def run_window(settings: Settings, cfg: Config, *, debug: bool = False, menubar:
         elif cmd == "mic":
             core.call(core.set_mic(not core.mic))
         elif cmd == "stop":
+            logger.info("Durdur (menü)")
             core.call(core.interrupt())
         elif cmd == "quit":
             quit_app()

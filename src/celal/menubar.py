@@ -41,7 +41,7 @@ def main() -> int:
             self.menu = [
                 rumps.MenuItem("Pencereyi göster / gizle", callback=lambda _: _send("toggle")),
                 rumps.MenuItem(f"Mikrofon aç / kapat ({hotkey_label})", callback=lambda _: _send("mic")),
-                rumps.MenuItem("Durdur (konuşmayı ve isteği kes)", callback=lambda _: _send("stop")),
+                rumps.MenuItem("Durdur (sesi ve Mac görevini kes)", callback=lambda _: _send("stop")),
                 None,
                 rumps.MenuItem("Çıkış", callback=self.quit),
             ]

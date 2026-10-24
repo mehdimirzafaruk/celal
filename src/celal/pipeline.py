@@ -1,8 +1,14 @@
-"""Pipecat pipeline assembly for Celal (voice and text modes); the LLM is Hermes."""
+"""Pipecat pipeline assembly for Celal (voice and text modes).
+
+The pipeline is only Celal's ears and mouth: mic → VAD/turn → Whisper →
+voice commands → user turn → :class:`TurnSink` (hands the finished turn to
+the tab router in :mod:`celal.core`) and ``TTSSpeakFrame`` → TTS → speaker.
+Answers come from the tabs' brains (Mac Claude Code / Hermes), not from a
+Pipecat LLM service.
+"""
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -10,16 +16,8 @@ from loguru import logger
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import (
-    BotStartedSpeakingFrame,
-    BotStoppedSpeakingFrame,
-    ErrorFrame,
-    LLMFullResponseEndFrame,
-    LLMFullResponseStartFrame,
-    TTSStoppedFrame,
-)
-from pipecat.observers.base_observer import BaseObserver, FramePushed
-from pipecat.frames.frames import Frame, TranscriptionFrame
+from pipecat.frames.frames import Frame, LLMContextFrame
+from pipecat.observers.base_observer import BaseObserver
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -40,9 +38,7 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 from celal.echo_gate import MicGate, SpeakingWindow, TranscriptGate
 from celal.audio_io import SoundDeviceTransport, SoundDeviceTransportParams
-from celal.llm_hermes import HermesLLMService
 from celal.stt_filter import WhisperHallucinationFilter
-from celal.timing import TurnTimer, TurnTimingObserver
 from celal.tts_ema import EMALightningTTSService
 from celal.tts_say import SayTTSService
 from celal.wake import ListenState, VoiceCommandGate
@@ -76,11 +72,11 @@ class Config:
     # listen, "Celal dinlemeyi durdur" makes it passive again (celal.wake).
     wake: bool = True
     printer: Callable[[str], None] = field(default=print)
-    print_sentences: bool = True
+    print_sentences: bool = False
 
 
 def make_tts(cfg: Config) -> EMALightningTTSService | SayTTSService:
-    on_sentence = (lambda s: cfg.printer(f"[celal] {s}")) if cfg.print_sentences else None  # noqa: E731
+    on_sentence = (lambda s: cfg.printer(f"[ses] {s}")) if cfg.print_sentences else None  # noqa: E731
     if cfg.tts == "ema":
         return EMALightningTTSService(sample_rate=OUT_RATE, on_sentence=on_sentence)
     if cfg.tts == "say":
@@ -103,66 +99,43 @@ def turn_start_strategies(min_words: int):
     return [VADUserTurnStartStrategy(), TranscriptionUserTurnStartStrategy()]
 
 
-class ReplyTracker(BaseObserver):
-    """Knows when a reply has been fully spoken (text mode waits on this)."""
-
-    def __init__(self, **kwargs):
-        super().__init__(observe_every_push=False, **kwargs)
-        self.reset()
-
-    def reset(self) -> None:
-        self.llm_started = False
-        self.llm_ended = False
-        self.tts_stopped = False
-        self.bot_speaking = False
-        self.last_event = time.monotonic()
-        self.errors: list[str] = []
-
-    async def on_push_frame(self, data: FramePushed):
-        frame = data.frame
-        if isinstance(frame, LLMFullResponseStartFrame):
-            self.llm_started = True
-        elif isinstance(frame, LLMFullResponseEndFrame):
-            self.llm_ended = True
-        elif isinstance(frame, TTSStoppedFrame) and self.llm_ended:
-            self.tts_stopped = True
-        elif isinstance(frame, BotStartedSpeakingFrame):
-            self.bot_speaking = True
-        elif isinstance(frame, BotStoppedSpeakingFrame):
-            self.bot_speaking = False
-        elif isinstance(frame, ErrorFrame):
-            self.errors.append(frame.error)
-        else:
-            return
-        self.last_event = time.monotonic()
-
-    def done(self, settle: float = 0.6) -> bool:
-        idle = time.monotonic() - self.last_event > settle
-        if self.llm_ended and self.tts_stopped and not self.bot_speaking and idle:
-            return True
-        # LLM failed or produced nothing to say.
-        return self.llm_ended and not self.bot_speaking and idle and bool(self.errors)
+def last_user_text(context: LLMContext) -> str | None:
+    """The newest user message in a Pipecat context, flattened to plain text."""
+    for message in reversed(context.get_messages()):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            return content.strip() or None
+        if isinstance(content, list):
+            parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+            text = " ".join(p for p in parts if p).strip()
+            return text or None
+    return None
 
 
-class MacRouter(FrameProcessor):
-    """Spoken "Mac'te …" requests go to the Mac task runner instead of Hermes.
+class TurnSink(FrameProcessor):
+    """End of the ears: a finished spoken user turn goes to ``route(text)``, never further down.
 
-    ``route(text)`` returns True when it took the transcript; the frame is
-    then not passed on to the user aggregator.
+    Sits where an LLM service would be; the user aggregator (VAD + Smart Turn)
+    decides when the turn is over and pushes the context.
     """
 
-    def __init__(self, route: Callable[[str], bool], **kwargs):
+    def __init__(self, route: Callable[[str], None], **kwargs):
         super().__init__(**kwargs)
         self._route = route
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
-        if isinstance(frame, TranscriptionFrame) and frame.text.strip():
-            try:
-                if self._route(frame.text.strip()):
-                    return
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"mac router: {e}")
+        if isinstance(frame, LLMContextFrame):
+            text = last_user_text(frame.context)
+            frame.context.set_messages([])  # the tabs keep the conversation; do not grow this one
+            if text:
+                try:
+                    self._route(text)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"turn sink: {e}")
+            return
         await self.push_frame(frame, direction)
 
 
@@ -170,11 +143,8 @@ class MacRouter(FrameProcessor):
 class Built:
     worker: PipelineWorker
     transport: SoundDeviceTransport
-    llm: HermesLLMService
     tts: EMALightningTTSService | SayTTSService
-    timer: TurnTimer
-    reply: ReplyTracker
-    user_aggregator: object
+    user_aggregator: object | None = None
     window: SpeakingWindow | None = None
     listen: ListenState | None = None  # voice commands gate (None: always listening)
 
@@ -195,12 +165,11 @@ def _worker(pipeline: Pipeline, observers: list[BaseObserver]) -> PipelineWorker
 
 def build_voice(
     cfg: Config,
-    llm: HermesLLMService,
+    route: Callable[[str], None],
     observers: list[BaseObserver] | None = None,
-    mac_route: Callable[[str], bool] | None = None,
     listen: ListenState | None = None,
 ) -> Built:
-    """Mic → Silero VAD + Smart Turn v3 → Whisper (tr) → [voice commands] → Hermes → TTS → speaker."""
+    """Mic → Silero VAD + Smart Turn v3 → Whisper (tr) → [voice commands] → turn → ``route``; TTS → speaker."""
     transport = SoundDeviceTransport(
         SoundDeviceTransportParams(
             audio_in_enabled=True,
@@ -238,25 +207,21 @@ def build_voice(
             *gate_stt,
             WhisperHallucinationFilter(),
             *([VoiceCommandGate(listen)] if listen is not None else []),
-            *([MacRouter(mac_route)] if mac_route else []),
             aggregators.user(),
-            llm,
+            TurnSink(route),
             tts,
             transport.output(),
-            aggregators.assistant(),
         ]
     )
-    timer = TurnTimer(emit=cfg.printer)
-    reply = ReplyTracker()
-    worker = _worker(pipeline, [TurnTimingObserver(timer), reply, *(observers or [])])
+    worker = _worker(pipeline, list(observers or []))
     logger.debug(
         f"voice pipeline: stt={STT_MODELS[cfg.stt]} tts={cfg.tts} barge_in={cfg.barge_in} wake={listen is not None}"
     )
-    return Built(worker, transport, llm, tts, timer, reply, aggregators.user(), window, listen)
+    return Built(worker, transport, tts, aggregators.user(), window, listen)
 
 
-def build_text(cfg: Config, llm: HermesLLMService, observers: list[BaseObserver] | None = None) -> Built:
-    """Typed prompt → Hermes → TTS → speaker (and/or WAV)."""
+def build_text(cfg: Config, observers: list[BaseObserver] | None = None) -> Built:
+    """Speech only: ``TTSSpeakFrame`` → TTS → speaker (and/or WAV)."""
     transport = SoundDeviceTransport(
         SoundDeviceTransportParams(
             audio_out_enabled=True,
@@ -266,10 +231,6 @@ def build_text(cfg: Config, llm: HermesLLMService, observers: list[BaseObserver]
         )
     )
     tts = make_tts(cfg)
-    context = LLMContext()
-    aggregators = LLMContextAggregatorPair(context)
-    pipeline = Pipeline([aggregators.user(), llm, tts, transport.output(), aggregators.assistant()])
-    timer = TurnTimer(emit=cfg.printer)
-    reply = ReplyTracker()
-    worker = _worker(pipeline, [TurnTimingObserver(timer), reply, *(observers or [])])
-    return Built(worker, transport, llm, tts, timer, reply, aggregators.user())
+    pipeline = Pipeline([tts, transport.output()])
+    worker = _worker(pipeline, list(observers or []))
+    return Built(worker, transport, tts)

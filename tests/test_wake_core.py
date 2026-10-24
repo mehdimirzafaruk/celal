@@ -2,8 +2,8 @@
 
 The mic is a short silent WAV (no audio device); Whisper MLX never runs because
 no speech reaches it. Transcripts are injected after the input transport, so the
-echo gate, hallucination filter, command gate, Mac router, aggregator and the
-(fake) Hermes client are all real.
+echo gate, hallucination filter, command gate, aggregator, turn sink and tab
+router are all real; the Mac brain is a fake.
 """
 
 import asyncio
@@ -13,6 +13,7 @@ import wave
 
 import pytest
 from pipecat.frames.frames import TranscriptionFrame
+from fakes_mac import FakeBrains, until
 from test_core import FakeClient, FakeTTS, FakeTunnel
 
 import celal.pipeline as pipeline_mod
@@ -37,9 +38,11 @@ def voice_core(settings, tmp_path, monkeypatch):
     async def make(client, events, wake=True):
         cfg = Config(play=False, print_sentences=False, printer=lambda s: None, mic_on_start=True, wake=wake,
                      input_wav=silent_wav(tmp_path / "silence.wav"), input_wav_tail_secs=0.2)
+        brains = FakeBrains()
         core = CelalCore(settings, cfg, voice=True, emit=events.append, client=client, tunnel=FakeTunnel(),
-                         health_interval=0.05)
+                         health_interval=0.05, brain_factory=brains)
         await core.start(warm=False)  # warm=True would load Whisper
+        core.brains = brains
         return core
 
     return make
@@ -52,14 +55,21 @@ async def hear(core, text):
 
 async def ask(core, text):
     """Speak while active and wait until the reply has been spoken (turn ends by the aggregator's stop timeout)."""
-    core.turn_done.clear()  # still set from the previous turn until the transcript watcher begins the new one
+    n = len(core.brains.prompts)
     await hear(core, text)
-    await asyncio.wait_for(core.turn_done.wait(), 15)
-    await asyncio.sleep(0.8)  # echo tail after the spoken reply
+    assert await until(lambda: len(core.brains.prompts) > n, 15)
+    tab = core.tabs.active
+    assert await until(lambda: not tab.busy, 15)
+    await core.wait_quiet(10)
+    await asyncio.sleep(0.5)  # echo tail after the spoken reply
 
 
 def user_texts(events):
-    return [e["text"] for e in events if e["type"] == "user"]
+    return [e["line"]["text"] for e in events if e["type"] == "tab_line" and e["line"]["role"] == "user"]
+
+
+def prompts(core):
+    return [p for _, p in core.brains.prompts]
 
 
 async def test_passive_until_start_phrase_then_active_until_stop_phrase(voice_core, settings):
@@ -78,8 +88,7 @@ async def test_passive_until_start_phrase_then_active_until_stop_phrase(voice_co
         await hear(core, "Mac'te testleri çalıştır")
         await hear(core, "Celal dinlemeyi durdur")
         await asyncio.sleep(0.3)
-        assert client.prompts == [] and user_texts(events) == []
-        assert not core.mac.busy and not any(e["type"] == "mac" for e in events)
+        assert prompts(core) == [] and user_texts(events) == []
         assert core.built.listen.dropped == ["hava nasıl", "Mac'te testleri çalıştır", "Celal dinlemeyi durdur"]
 
         # the exact start phrase (as Whisper writes it) switches to active and is not a message
@@ -90,11 +99,11 @@ async def test_passive_until_start_phrase_then_active_until_stop_phrase(voice_co
         assert wake and wake[-1]["active"] is True
         assert user_texts(events) == []
 
-        # active: speech reaches Hermes (turn ends by the aggregator's stop timeout: no VAD here)
+        # active: speech reaches the Mac tab (turn ends by the aggregator's stop timeout: no VAD here)
         await ask(core, "hava nasıl")
-        assert client.prompts == ["hava nasıl"]  # nothing from the passive phase was aggregated into it
+        assert prompts(core) == ["hava nasıl"]  # nothing from the passive phase was aggregated into it
         assert user_texts(events) == ["hava nasıl"]
-        assert [e for e in events if e["type"] == "user"][0]["source"] == "mic"
+        assert client.prompts == []  # Hermes is not the default brain any more
         assert core.state == LISTENING
 
         # the stop phrase returns to passive and is not a message
@@ -105,7 +114,7 @@ async def test_passive_until_start_phrase_then_active_until_stop_phrase(voice_co
         await hear(core, "bunu duyma")
         await hear(core, "Celal dinlemeye başla")
         await ask(core, "ikinci soru")
-        assert client.prompts == ["hava nasıl", "ikinci soru"]
+        assert prompts(core) == ["hava nasıl", "ikinci soru"]
         assert user_texts(events) == ["hava nasıl", "ikinci soru"]
     finally:
         await core.shutdown()
@@ -118,7 +127,7 @@ async def test_no_wake_keeps_the_old_always_listening_behaviour(voice_core, sett
     try:
         assert core.state == LISTENING and core.snapshot()["wake"]["on"] is False
         await ask(core, "merhaba")
-        assert client.prompts == ["merhaba"] and user_texts(events) == ["merhaba"]
+        assert prompts(core) == ["merhaba"] and user_texts(events) == ["merhaba"]
     finally:
         await core.shutdown()
 
@@ -184,6 +193,8 @@ def _cli_env(monkeypatch, tmp_path):
     (tmp_path / "models").mkdir()
     monkeypatch.setenv("CELAL_CONFIG", str(tmp_path / "yok.toml"))
     monkeypatch.setenv("CELAL_MAC_API", "0")
+    monkeypatch.setenv("CELAL_MAC_WARM", "0")  # no real Claude process in tests
+    monkeypatch.setenv("CELAL_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("CELAL_PORT", "1")  # nothing answers: "bağlı değil" quickly
     monkeypatch.setenv("CELAL_API_KEY_FILE", str(tmp_path / "no-key"))
     monkeypatch.delenv("CELAL_SSH_HOST", raising=False)

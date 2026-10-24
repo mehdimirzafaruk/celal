@@ -15,4 +15,6 @@ def settings(tmp_path):
         mac_api=False,  # tests never bind 8643 or start a reverse ssh
         mac_api_key_file=str(tmp_path / "mac-api-key"),
         mac_cwd=str(tmp_path),
+        mac_warm=False,  # never start a real Claude
+        state_dir=str(tmp_path / "state"),
     )

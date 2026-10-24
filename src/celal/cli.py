@@ -19,66 +19,50 @@ async def _run_text(settings, cfg, args) -> int:
     from celal.core import CelalCore
     from celal.pipeline import OUT_RATE
 
-    t_sent = [0.0]
-    first_delta = [None]
-
     def show(ev: dict) -> None:
         kind = ev.get("type")
-        if kind == "status":
-            return
-        if kind == "assistant_delta" and first_delta[0] is None:
-            first_delta[0] = time.perf_counter()
-        elif kind == "assistant_end":
-            text = (ev.get("text") or "").strip()
-            if text:
-                print(f"[celal] {text}", flush=True)
-            if t_sent[0] and first_delta[0]:
-                print(
-                    f"⏱ ilk kelime {first_delta[0] - t_sent[0]:.1f} s, tam cevap {time.perf_counter() - t_sent[0]:.1f} s",
-                    flush=True,
-                )
-        elif kind == "tool":
-            print(f"[araç] {ev['name']}", flush=True)
+        if kind == "tab_line":
+            ln = ev["line"]
+            tag = "[mac]" if ev.get("kind") == "mac" else "[hermes]"
+            role = ln.get("role")
+            if role == "progress":
+                text = ln["text"]
+                print(f"{tag} {text if text.endswith('…') else text + '…'}", flush=True)
+            elif role == "assistant":
+                print(f"[celal] {ln['text']}", flush=True)
+            elif role == "error":
+                print(f"[hata] {ln['text']}", flush=True)
+            elif role == "info":
+                print(f"{tag} {ln['text']}", flush=True)
+            elif role == "user" and ln.get("queued"):
+                print(f"{tag} sırada (sekme meşgul ya da {settings.mac_max_parallel} iş çalışıyor)", flush=True)
+        elif kind == "timing":
+            print(ev["text"], flush=True)
+        elif kind == "stopped":
+            print(f"[durdur] {ev['text']}", flush=True)
         elif kind == "error":
             print(f"[hata] {ev['text']}", flush=True)
         elif kind == "info":
             print(f"[bilgi] {ev['text']}", flush=True)
-        elif kind == "user" and ev.get("source") == "mic":
-            print(f"[sen (ses)] {ev['text']}", flush=True)
         elif kind == "wake":
             print(f"[dinleme] {'aktif' if ev.get('active') else 'pasif'}: {ev['text']}", flush=True)
-        elif kind == "mac":
-            phase = ev.get("phase")
-            if phase == "start":
-                who = "Hermes'ten" if ev.get("source") == "hermes" else "Celal'den"
-                print(f"[mac] {who} görev başladı ({ev.get('cwd')}): {ev.get('task')}", flush=True)
-            elif phase == "progress":
-                line = ev.get("text") or ""
-                print(f"[mac] {line if line.endswith('…') else line + '…'}", flush=True)
-            elif phase == "done":
-                print(f"[mac] bitti: {ev.get('status')}, {ev.get('seconds')} s", flush=True)
-                body = (ev.get("text") or "").strip()
-                if body:
-                    print(f"[mac sonuç]\n{body}", flush=True)
-                if ev.get("summary") and ev.get("source") != "hermes":
-                    print(f"[mac özet, sesli] {ev['summary']}", flush=True)
 
-    cfg.print_sentences = False
     voice = bool(args.mic)  # --text --mic: mic open too (speaker test / terminal voice chat)
     core = CelalCore(settings, cfg, voice=voice, emit=show)
     code = 0
     try:
-        # start() opens the ssh tunnel first; if it fails later (TTS, audio
-        # device) the finally below still closes the tunnel.
         try:
             await core.start()
         except Exception as e:  # noqa: BLE001
             print(f"[hata] Celal başlatılamadı: {e}", flush=True)
             return 1
+        active = core.tabs.active
+        print(f"Beyin: Mac'teki Claude Code ({settings.mac_model}, {active.cwd if active else settings.mac_cwd}); "
+              f"“sunucuda …” Hermes'e gider.", flush=True)
         if await core.wait_connected(args.connect_timeout):
             print(f"Hermes'e bağlı ({settings.api}, sohbet: {core.client.conversation}).", flush=True)
         else:
-            print(f"[hata] Hermes'e bağlanılamadı: {core.reason} (tünel: {core.tunnel.status} {core.tunnel.detail})", flush=True)
+            print(f"[bilgi] Hermes'e bağlanılamadı: {core.reason} (Mac işleri yine çalışır)", flush=True)
         if core.mac_api is not None:
             print(f"Mac API: {core.mac_api_status} (Hermes → Mac, ters tünel ayrı ssh ile)", flush=True)
         if voice and cfg.wake:
@@ -98,49 +82,103 @@ async def _run_text(settings, cfg, args) -> int:
                 continue
             if not interactive:
                 print(f"[sen] {text}", flush=True)
-            t_sent[0], first_delta[0] = time.perf_counter(), None
-            cut_before = core.interruptions
             out = core.built.transport.output() if core.built else None
             bytes_before = getattr(out, "bytes_written", 0)
-            mac_req = core.mac_request(text)
-            if mac_req is not None:
-                task = await core.run_mac_task(mac_req[0], mac_req[1], shown=text)
-                if task is None:
-                    code = 1
-                    continue
-                if not await task.wait(settings.mac_timeout + 30):
-                    print("[hata] Mac görevi zaman aşımına uğradı", flush=True)
-                    code = 1
-                    continue
-                if task.status != "done":
-                    code = 1
-                try:
-                    await asyncio.wait_for(core.speech_done.wait(), timeout=120)
-                except TimeoutError:
-                    print("[hata] özet okunamadı (zaman aşımı)", flush=True)
-                spoken = (getattr(out, "bytes_written", 0) - bytes_before) / (OUT_RATE * 2)
-                print(f"[ses] {spoken:.1f} s okundu", flush=True)
-                continue
-            if not await core.send_text(text):
+            tab = await core.send_text(text)
+            if tab is None:
                 code = 1
                 continue
-            try:
-                await asyncio.wait_for(core.turn_done.wait(), timeout=args.timeout)
-            except TimeoutError:
+            before = tab.finished
+            print(f"[{tab.kind}] sekme “{tab.label}” ({tab.cwd})", flush=True)
+            deadline = time.monotonic() + args.timeout
+            while tab.finished <= before and time.monotonic() < deadline and not tab.closed:
+                await asyncio.sleep(0.1)
+            if tab.finished <= before:
                 print("[hata] cevap zaman aşımına uğradı", flush=True)
                 code = 1
-            if core.last_error:
+                continue
+            if tab.status != "done":
                 code = 1
+            await core.wait_quiet(120)
             spoken = (getattr(out, "bytes_written", 0) - bytes_before) / (OUT_RATE * 2)
-            window = core.built.window if core.built else None
-            gate = f", yankı kapısı {window.dropped_audio} mikrofon bloğu yok saydı" if window and voice else ""
-            cut = core.interruptions - cut_before
-            print(f"[ses] {spoken:.1f} s okundu, kesinti {cut}{gate}", flush=True)
+            print(f"[ses] {spoken:.1f} s okundu", flush=True)
     finally:
         await core.shutdown()
     if args.out:
         print(f"ses kaydı: {args.out}", flush=True)
     return code
+
+
+DELEGATE_INSTRUCTIONS = (
+    "Bu istek Mirza'nın Mac'indeki Claude Code'dan (Celal) geliyor: Mac'te yapılamayan, sunucuda yapılması gereken "
+    "bir iş. İşi sunucuda yap ve sonucu eksiksiz, düz metin olarak yaz. İşi Mac'e (mac_task) geri gönderme."
+)
+
+
+async def _hermes_once(settings, text: str, timeout: float) -> int:
+    """``celal hermes``: one request to Hermes; opens a temporary tunnel when none is up."""
+    from celal.hermes import HermesClient, HermesError
+    from celal.tunnel import TunnelManager
+
+    client = HermesClient(settings, instructions=DELEGATE_INSTRUCTIONS, read_timeout=timeout)
+    tunnel = None
+    try:
+        ok, reason = await client.ping()
+        if not ok:
+            if not settings.ssh_host:
+                print(f"hata: Hermes'e ulaşılamadı ({reason}) ve [ssh] host ayarı yok", file=sys.stderr)
+                return 2
+            tunnel = TunnelManager(settings)
+            tunnel.start()
+            deadline = time.monotonic() + 30
+            while not ok and time.monotonic() < deadline:
+                await asyncio.sleep(0.5)
+                ok, reason = await client.ping()
+            if not ok:
+                print(f"hata: Hermes'e bağlanılamadı: {reason} (tünel: {tunnel.status} {tunnel.detail})", file=sys.stderr)
+                return 2
+        wrote = False
+        async for ev in client.stream(text):
+            if ev.kind == "text":
+                sys.stdout.write(ev.value)
+                sys.stdout.flush()
+                wrote = True
+            elif ev.kind == "tool":
+                print(f"[hermes aracı] {ev.value}", file=sys.stderr, flush=True)
+        if wrote:
+            sys.stdout.write("\n")
+        else:
+            print("(Hermes boş cevap verdi)", file=sys.stderr)
+        return 0
+    except HermesError as e:
+        print(f"hata: {e}", file=sys.stderr)
+        return 1
+    finally:
+        await client.aclose()
+        if tunnel is not None:
+            await tunnel.stop()
+
+
+def run_hermes(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="celal hermes",
+        description="Sunucudaki Hermes'e tek istek gönderir, cevabı stdout'a yazar (Mac'teki Claude bununla delege eder).",
+    )
+    parser.add_argument("text", nargs="*", help="istek (boşsa stdin)")
+    parser.add_argument("--conversation", default=None, help="Hermes sohbet adı (varsayılan: <conversation>-claude)")
+    parser.add_argument("--timeout", type=float, default=1200.0, help="cevap için en çok saniye")
+    parser.add_argument("--log", default="warning")
+    args = parser.parse_args(argv)
+    _setup_logging(args.log)
+    text = " ".join(args.text).strip() or sys.stdin.read().strip()
+    if not text:
+        print("hata: istek boş", file=sys.stderr)
+        return 2
+    from celal.config import load_settings
+
+    settings = load_settings()
+    settings.conversation = args.conversation or f"{settings.conversation}-claude"
+    return asyncio.run(_hermes_once(settings, text, args.timeout))
 
 
 def _stdin_lines() -> asyncio.Queue:
@@ -160,8 +198,15 @@ def _stdin_lines() -> asyncio.Queue:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="celal", description="Celal: Hermes'e bağlanan Türkçe sesli asistan")
-    parser.add_argument("--text", action="store_true", help="terminal modu: stdin'den yazı → Hermes → ses")
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "hermes":
+        return run_hermes(argv[1:])
+    parser = argparse.ArgumentParser(
+        prog="celal",
+        description="Celal: Türkçe sesli asistan (beyin: Mac'teki Claude Code; sunucu işi: Hermes). "
+        "Alt komut: celal hermes \"<istek>\"",
+    )
+    parser.add_argument("--text", action="store_true", help="terminal modu: stdin'den yazı → Mac Claude / Hermes → ses")
     parser.add_argument("--bench", action="store_true", help="Whisper / TTS / RAM ölçümü")
     parser.add_argument("--tts", choices=["ema", "say"], default="ema", help="TTS motoru (varsayılan ema)")
     parser.add_argument("--stt", choices=["turbo", "turbo-q4"], default="turbo", help="Whisper modeli")

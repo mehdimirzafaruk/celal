@@ -15,15 +15,18 @@ Example ``~/.config/celal/config.toml``::
     conversation = "celal-mac"
     api = "responses"          # veya "chat"
 
+    prefixes = ["sunucuda", "Hermes'e sor"]  # bu ön ekle başlayan mesaj doğrudan Hermes'e gider
+
     [ui]
     hotkey = "ctrl+space"      # mikrofonu aç/kapat; "off" kapatır
 
-    [mac]                      # "Mac'te yap": görevi Mac'teki Claude Code'a ver
-    prefixes = ["Mac'te", "bilgisayarda"]   # büyük/küçük harf fark etmez
+    [mac]                      # varsayılan beyin: Mac'teki Claude Code (sekme başına bir oturum)
+    model = "sonnet"           # "opus" da olur
     cwd = "~"                  # varsayılan çalışma klasörü
     claude = "claude"          # yol ya da PATH'teki ad (~/.local/bin de aranır)
-    timeout = 1800             # saniye
-    max_parallel = 3           # aynı anda en çok kaç Mac işi çalışır
+    timeout = 1800             # bir cevap için en çok saniye
+    idle_close = 600           # boşta kalan Claude süreci kaç saniye sonra kapanır (oturum saklanır)
+    max_parallel = 3           # aynı anda en çok kaç sekme çalışır (fazlası sırada)
     api = true                 # Hermes → Mac yerel API'si (127.0.0.1:api_port)
     api_port = 8643
 """
@@ -37,7 +40,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 CONFIG_DIR = Path("~/.config/celal")
-DEFAULT_MAC_PREFIXES = ("Mac'te", "Mac'de", "Macte", "bilgisayarda")
+DEFAULT_MAC_PREFIXES = ("Mac'te", "Mac'de", "Macte", "bilgisayarda")  # eski ön ek: artık yalnız atılır
+DEFAULT_HERMES_PREFIXES = ("sunucuda", "Hermes'e sor", "Hermese sor", "Hermes'e")
+DEFAULT_NEW_TAB_PREFIXES = ("yeni görev", "yeni sekme")
 
 
 def _bool(value) -> bool:
@@ -57,12 +62,18 @@ class Settings:
     api_key_file: str = str(CONFIG_DIR / "api-key")
     model: str = "celal"
     hotkey: str = "ctrl+space"  # global mic toggle; "off" disables
-    # "Mac'te yap": tasks for the Mac's own Claude Code
+    hermes_prefixes: list[str] = field(default_factory=lambda: list(DEFAULT_HERMES_PREFIXES))
+    new_tab_prefixes: list[str] = field(default_factory=lambda: list(DEFAULT_NEW_TAB_PREFIXES))
+    # The default brain: the Mac's own Claude Code, one persistent session per tab
     mac_prefixes: list[str] = field(default_factory=lambda: list(DEFAULT_MAC_PREFIXES))
+    mac_model: str = "sonnet"
     mac_cwd: str = "~"
     mac_claude: str = "claude"
     mac_timeout: float = 1800.0
-    mac_max_parallel: int = 3  # concurrent "claude -p" tasks (never below 1)
+    mac_idle_close: float = 600.0
+    mac_warm: bool = True  # start the active tab's Claude ahead of the first message
+    mac_max_parallel: int = 3  # tabs answering at the same time (never below 1)
+    state_dir: str = str(CONFIG_DIR)  # tabs.json, tasks.json
     mac_api: bool = True  # local HTTP API for Hermes (reached through ssh -R)
     mac_api_port: int = 8643
     mac_api_key_file: str = str(CONFIG_DIR / "mac-api-key")
@@ -99,7 +110,19 @@ def load_settings(env: Mapping[str, str] | None = None, config_path: str | Path 
     s.api_key_file = env.get("CELAL_API_KEY_FILE") or hermes.get("api_key_file") or s.api_key_file
     s.model = env.get("CELAL_MODEL") or hermes.get("model") or s.model
     s.hotkey = env.get("CELAL_HOTKEY") or data.get("ui", {}).get("hotkey") or s.hotkey
+    hp = env.get("CELAL_HERMES_PREFIXES")
+    if hp:
+        s.hermes_prefixes = [p.strip() for p in hp.split(",") if p.strip()]
+    elif isinstance(hermes.get("prefixes"), list):
+        s.hermes_prefixes = [str(p).strip() for p in hermes["prefixes"] if str(p).strip()]
     mac = data.get("mac", {})
+    s.mac_model = env.get("CELAL_MAC_MODEL") or mac.get("model") or s.mac_model
+    s.mac_idle_close = float(env.get("CELAL_MAC_IDLE_CLOSE") or mac.get("idle_close") or s.mac_idle_close)
+    if "CELAL_MAC_WARM" in env:
+        s.mac_warm = _bool(env["CELAL_MAC_WARM"])
+    elif "warm" in mac:
+        s.mac_warm = _bool(mac["warm"])
+    s.state_dir = env.get("CELAL_STATE_DIR") or data.get("state_dir") or s.state_dir
     prefixes = env.get("CELAL_MAC_PREFIXES")
     if prefixes:
         s.mac_prefixes = [p.strip() for p in prefixes.split(",") if p.strip()]

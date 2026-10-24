@@ -13,7 +13,7 @@
   html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text);
     font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; }
   body { display: flex; flex-direction: column; }
-  header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line);
+  header { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--line);
     background: var(--panel); -webkit-user-select: none; user-select: none; }
   header h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .2px; }
   .pill { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
@@ -28,16 +28,49 @@
   #state.speaking .dot { background: var(--accent); animation: pulse .6s infinite; }
   #state.listening .dot { background: var(--ok); }
   @keyframes pulse { 50% { opacity: .25; } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* tab strip */
+  #tabs { display: flex; gap: 4px; padding: 6px 8px 0; background: var(--panel); border-bottom: 1px solid var(--line);
+    overflow-x: auto; scrollbar-width: none; -webkit-user-select: none; user-select: none; }
+  #tabs::-webkit-scrollbar { display: none; }
+  .tab { display: inline-flex; align-items: center; gap: 6px; max-width: 190px; padding: 6px 8px 7px 10px;
+    border: 1px solid transparent; border-bottom: none; border-radius: 9px 9px 0 0; color: var(--muted);
+    font-size: 12.5px; cursor: pointer; white-space: nowrap; flex: 0 0 auto; position: relative; top: 1px; }
+  .tab:hover { color: var(--text); background: #1c2029; }
+  .tab.active { background: var(--bg); color: var(--text); border-color: var(--line); }
+  .tab .lbl { overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
+  .tab .st { width: 12px; text-align: center; font-size: 11px; flex: 0 0 12px; }
+  .tab .st.running::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+    border: 2px solid var(--warn); border-top-color: transparent; animation: spin .8s linear infinite; }
+  .tab .st.queued::before { content: "…"; color: var(--warn); }
+  .tab .st.done::before { content: "✓"; color: var(--ok); }
+  .tab .st.error::before { content: "!"; color: var(--bad); font-weight: 700; }
+  .tab .st.stopped::before { content: "■"; color: var(--muted); font-size: 9px; }
+  .tab .badge { font-size: 11px; }
+  .tab .unread { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); display: none; }
+  .tab.unread .unread { display: inline-block; }
+  .tab .q { font-size: 10.5px; color: var(--warn); }
+  .tab .x { opacity: 0; font-size: 13px; line-height: 1; padding: 0 2px; border-radius: 4px; }
+  .tab:hover .x, .tab.active .x { opacity: .6; } .tab .x:hover { opacity: 1; background: #2a2f3a; }
+  .tab.new { color: var(--accent); padding-right: 10px; }
+
   #reason { font-size: 11px; color: var(--muted); padding: 4px 16px; border-bottom: 1px solid var(--line); min-height: 22px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #log { flex: 1; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+  #logs { flex: 1; position: relative; min-height: 0; }
+  .log { position: absolute; inset: 0; overflow-y: auto; padding: 14px 16px; display: none; flex-direction: column; gap: 10px; }
+  .log.active { display: flex; }
   .msg { max-width: 88%; padding: 9px 12px; border-radius: 12px; white-space: pre-wrap; word-wrap: break-word; }
   .msg.me { align-self: flex-end; background: var(--me); border-bottom-right-radius: 4px; }
   .msg.him { align-self: flex-start; background: var(--him); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .msg.hermes { border-color: #2c3f5c; }
   .msg .who { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
-  .note { align-self: center; font-size: 12px; color: var(--muted); }
+  .msg .tag { font-size: 10.5px; color: var(--warn); margin-left: 6px; }
+  .note { align-self: center; font-size: 12px; color: var(--muted); text-align: center; }
   .note.err { color: var(--bad); }
-  .note.tool { color: var(--warn); }
+  .note.stop { color: #ffcaca; background: #3a1d1d; border: 1px solid #6b2b2b; padding: 3px 10px; border-radius: 8px; }
+  .note.prog { align-self: flex-start; color: #d9b56a; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11.5px; text-align: left; }
   .empty { margin: auto; color: var(--muted); text-align: center; font-size: 13px; }
   footer { border-top: 1px solid var(--line); background: var(--panel); padding: 10px 12px; display: flex; gap: 8px; align-items: flex-end; }
   textarea { flex: 1; resize: none; min-height: 38px; max-height: 140px; padding: 9px 11px; border-radius: 10px;
@@ -55,32 +88,28 @@
   button.mic.on.passive .rec { background: var(--warn); box-shadow: 0 0 0 3px rgba(255,200,80,.2); animation: pulse 2s infinite; }
   button.stop { background: #3a1d1d; border-color: #6b2b2b; color: #ffcaca; font-weight: 600; }
   button.stop:hover { border-color: var(--bad); }
-  .hint { font-size: 11px; color: var(--muted); margin-left: auto; align-self: center; }
+  button.stop.busy { background: #6b1f1f; border-color: var(--bad); color: #fff; }
+  .hint { font-size: 11px; color: var(--muted); margin-left: auto; align-self: center; text-align: right; }
   button:disabled { opacity: .45; cursor: default; }
-  .tools { display: flex; gap: 6px; }
+  .tools { display: flex; gap: 6px; align-items: center; }
   .tools button { height: 26px; font-size: 12px; padding: 0 9px; }
-  button.macmode.on { background: #2d2410; border-color: var(--warn); color: #ffe2a8; }
-  .msg.mac { align-self: flex-start; background: #1d1a12; border: 1px solid #4a3d1c; border-bottom-left-radius: 4px; }
-  .note.mac { color: #d9b56a; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
-  #macpill { display: none; } #macpill.on { display: inline-flex; color: var(--warn); border-color: #5a4a22; }
-  #macpill.on .dot { background: var(--warn); animation: pulse 1s infinite; }
+  #par { font-size: 11px; color: var(--warn); display: none; } #par.on { display: inline; }
 </style>
 </head>
 <body>
 <header>
   <h1>Celal</h1>
-  <span id="conn" class="pill bad"><span class="dot"></span><span id="conn-text">bağlı değil</span></span>
-  <span id="macpill" class="pill" title="Mac'te Claude Code çalışıyor"><span class="dot"></span>Mac</span>
+  <span id="conn" class="pill bad" title="Hermes (sunucu) bağlantısı"><span class="dot"></span><span id="conn-text">bağlı değil</span></span>
   <span id="state" class="pill"><span class="dot"></span><span id="state-text">hazır</span></span>
 </header>
+<nav id="tabs"></nav>
 <div id="reason">başlıyor…</div>
-<main id="log"><div class="empty" id="empty">Yaz ya da mikrofona bas, konuş.<br>Celal sunucudaki Hermes ile cevap verir.</div></main>
+<main id="logs"></main>
 <footer>
   <div style="display:flex;flex-direction:column;gap:6px;flex:1">
     <div class="tools">
-      <button id="stop" class="stop" title="Konuşmayı durdurur, sunucudaki isteği iptal eder, Mac'teki işi öldürür">■ Durdur</button>
-      <button id="newchat" title="Sunucuda yeni sohbet başlat">Yeni sohbet</button>
-      <button id="macmode" class="macmode" title="Açıkken mesajlar Hermes yerine Mac'teki Claude Code'a gider. Kapalıyken de &quot;Mac'te …&quot; ile başlayan mesajlar Mac'te çalışır.">Mac'te çalıştır</button>
+      <button id="stop" class="stop" title="Sesi keser, aktif sekmedeki Mac görevini durdurur (Esc). Sunucudaki işleri durdurmaz.">■ Durdur</button>
+      <span id="par"></span>
       <span class="hint" id="hint">Mikrofon kapalı</span>
     </div>
     <div style="display:flex;gap:8px;align-items:flex-end">
@@ -93,36 +122,102 @@
 <script>
 (function () {
   const $ = (id) => document.getElementById(id);
-  const log = $("log");
-  let current = null;   // assistant bubble being streamed
-  let micOn = false;
-  let macMode = false;
-  let hotkey = "";
+  const logs = $("logs");
+  let micOn = false, hotkey = "", activeId = null, tabsList = [];
+  const panes = {};        // tab id -> log element
+  const current = {};      // tab id -> assistant bubble being streamed
+  const streamed = {};     // tab id -> deltas seen in the running turn
   const STATE_CLASS = { "bekliyor": "waiting", "dinliyor": "listening", "düşünüyor": "thinking", "konuşuyor": "speaking" };
+  const STATUS_TEXT = { queued: "sırada", running: "çalışıyor", done: "bitti", error: "hata", stopped: "durduruldu", idle: "" };
   let wake = { on: false, active: true, start: "", stop: "" };
+  let stopTimer = null, stopShownAt = 0;
+
+  function api() { return (window.pywebview && window.pywebview.api) || null; }
   function micHint() {
     if (!micOn) return "Mikrofon kapalı" + (hotkey ? " · " + hotkey : "");
     const cmd = wake.on ? (wake.active ? " · “" + wake.stop + "” kapatır" : " · bekliyor: “" + wake.start + "” de") : "";
     return "Mikrofon AÇIK" + cmd + (hotkey ? " · " + hotkey : "");
   }
 
-  function atBottom() { return log.scrollHeight - log.scrollTop - log.clientHeight < 60; }
-  function add(el) { const stick = atBottom(); const e = $("empty"); if (e) e.remove(); log.appendChild(el); if (stick) log.scrollTop = log.scrollHeight; }
-  function bubble(cls, who, text) {
-    const d = document.createElement("div"); d.className = "msg " + cls;
-    const w = document.createElement("span"); w.className = "who"; w.textContent = who; d.appendChild(w);
-    const t = document.createElement("span"); t.className = "body"; t.textContent = text; d.appendChild(t);
-    add(d); return d;
+  function pane(id) {
+    if (!id) return null;
+    if (!panes[id]) {
+      const d = document.createElement("div"); d.className = "log"; d.dataset.tab = id;
+      const e = document.createElement("div"); e.className = "empty";
+      e.innerHTML = "Yaz ya da konuş.<br>Mac'teki Claude Code cevap verir; sunucu işi için “sunucuda …” de.";
+      d.appendChild(e); logs.appendChild(d); panes[id] = d;
+    }
+    return panes[id];
   }
-  function note(text, cls) { const d = document.createElement("div"); d.className = "note " + (cls || ""); d.textContent = text; add(d); }
+  function atBottom(p) { return p.scrollHeight - p.scrollTop - p.clientHeight < 60; }
+  function add(id, el) {
+    const p = pane(id || activeId); if (!p) return;
+    const stick = atBottom(p); const e = p.querySelector(".empty"); if (e) e.remove();
+    p.appendChild(el); if (stick) p.scrollTop = p.scrollHeight;
+  }
+  function bubble(id, cls, who, text, tag) {
+    const d = document.createElement("div"); d.className = "msg " + cls;
+    const w = document.createElement("span"); w.className = "who"; w.textContent = who;
+    if (tag) { const t = document.createElement("span"); t.className = "tag"; t.textContent = tag; w.appendChild(t); }
+    d.appendChild(w);
+    const t = document.createElement("span"); t.className = "body"; t.textContent = text; d.appendChild(t);
+    add(id, d); return d;
+  }
+  function note(id, text, cls) { const d = document.createElement("div"); d.className = "note " + (cls || ""); d.textContent = text; add(id, d); return d; }
+  function tabOf(id) { return tabsList.find(t => t.id === id) || {}; }
+  function who(id) { return tabOf(id).kind === "hermes" ? "Hermes" : "Celal (Mac)"; }
+
+  function renderLine(id, ln, fromHistory) {
+    switch (ln.role) {
+      case "user": bubble(id, "me", "sen", ln.text, ln.queued && !fromHistory ? "sırada" : ""); break;
+      case "assistant":
+        if (!fromHistory && ln.live && streamed[id]) { current[id] = null; break; }
+        bubble(id, "him" + (tabOf(id).kind === "hermes" ? " hermes" : ""), who(id) + (ln.seconds ? " · " + ln.seconds + " s" : ""), ln.text);
+        break;
+      case "progress": note(id, /…$/.test(ln.text) ? ln.text : ln.text + "…", "prog"); break;
+      case "error": note(id, ln.text, "err"); break;
+      default: note(id, ln.text);
+    }
+  }
+
+  function renderTabs() {
+    const nav = $("tabs"); nav.innerHTML = "";
+    tabsList.forEach((t) => {
+      const el = document.createElement("div");
+      el.className = "tab" + (t.active ? " active" : "") + (t.unread && !t.active ? " unread" : "");
+      el.title = t.label + (STATUS_TEXT[t.status] ? " · " + STATUS_TEXT[t.status] : "") + "\n" + t.cwd +
+        (t.source === "hermes" ? "\nHermes'ten geldi (📱)" : "") + "\nSağ tık ya da × kapatır";
+      const st = document.createElement("span"); st.className = "st " + (t.stopping ? "running" : t.status); el.appendChild(st);
+      if (t.source === "hermes") { const b = document.createElement("span"); b.className = "badge"; b.textContent = "📱"; el.appendChild(b); }
+      const l = document.createElement("span"); l.className = "lbl"; l.textContent = t.label; el.appendChild(l);
+      if (t.status === "queued" || t.waiting) { const q = document.createElement("span"); q.className = "q"; q.textContent = t.status === "queued" ? "sırada" : "+" + t.waiting; el.appendChild(q); }
+      if (t.stopping) { const q = document.createElement("span"); q.className = "q"; q.textContent = "durduruluyor"; el.appendChild(q); }
+      const u = document.createElement("span"); u.className = "unread"; el.appendChild(u);
+      const x = document.createElement("span"); x.className = "x"; x.textContent = "×"; x.title = "Sekmeyi kapat";
+      x.onclick = (e) => { e.stopPropagation(); api() && api().close_tab(t.id); };
+      el.appendChild(x);
+      el.onclick = () => { if (!t.active) { showPane(t.id); api() && api().select_tab(t.id); } };
+      el.oncontextmenu = (e) => { e.preventDefault(); api() && api().close_tab(t.id); };
+      nav.appendChild(el);
+    });
+    const plus = document.createElement("div"); plus.className = "tab new"; plus.textContent = "+ Yeni";
+    plus.title = "Yeni görev sekmesi (ya da mesaja “yeni görev …” diye başla)";
+    plus.onclick = () => api() && api().new_tab();
+    nav.appendChild(plus);
+    const act = nav.querySelector(".tab.active"); if (act) act.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+  function showPane(id) {
+    activeId = id;
+    Object.entries(panes).forEach(([k, p]) => p.classList.toggle("active", k === id));
+    const p = pane(id); if (p) { p.classList.add("active"); p.scrollTop = p.scrollHeight; }
+  }
 
   function status(s) {
-    const conn = $("conn");
-    conn.className = "pill " + (s.connected ? "ok" : "bad");
-    $("conn-text").textContent = s.conn;
+    $("conn").className = "pill " + (s.connected ? "ok" : "bad");
+    $("conn-text").textContent = "Hermes " + s.conn;
     const st = $("state"); st.className = "pill " + (STATE_CLASS[s.state] || "");
     $("state-text").textContent = s.state;
-    $("reason").textContent = (s.connected ? "Hermes: " : "Hermes: ") + s.reason + "  ·  tünel: " + s.tunnel;
+    $("reason").textContent = "Hermes: " + s.reason + "  ·  tünel: " + s.tunnel + (s.mac ? "  ·  Mac API: " + s.mac.api : "");
     micOn = !!s.mic; const mic = $("mic");
     if (s.wake) wake = s.wake;
     const passive = micOn && wake.on && !wake.active;
@@ -130,68 +225,86 @@
     $("mic-text").textContent = micOn ? (passive ? "Bekliyor" : "Dinliyor") : "Dinle";
     mic.disabled = !s.voice;
     $("hint").textContent = micHint();
-    const mac = s.mac || {};
-    macMode = !!mac.mode; $("macmode").classList.toggle("on", macMode);
-    $("macpill").classList.toggle("on", !!mac.busy);
-    const macTasks = mac.tasks || [];
-    $("macpill").lastChild.textContent = macTasks.length > 1 ? "Mac ×" + macTasks.length : "Mac";
-    $("macpill").title = mac.busy ? "Mac'te çalışıyor:\n" + macTasks.map(t => "• " + t.task).join("\n") : "";
-    $("input").placeholder = macMode ? "Mac'te çalıştırılacak görev… (Claude Code, izinsiz mod)" : "Celal'e yaz… (Enter gönderir, Shift+Enter satır)";
+    if (s.tabs) {
+      tabsList = s.tabs; tabsList.forEach(t => pane(t.id));
+      Object.keys(panes).forEach(k => { if (!tabsList.find(t => t.id === k)) { panes[k].remove(); delete panes[k]; } });
+      if (s.active && s.active !== activeId) showPane(s.active);
+      renderTabs();
+      const kind = tabOf(s.active).kind;
+      $("input").placeholder = kind === "hermes" ? "Hermes'e: “sunucuda …” ile başla (ön eksiz mesaj Mac sekmesine gider)" : "Celal'e yaz… (Mac'te Claude Code; “sunucuda …” Hermes'e gider)";
+    }
+    const m = s.mac || {};
+    const par = $("par");
+    par.classList.toggle("on", !!(m.running || m.queued));
+    par.textContent = (m.running || 0) + "/" + (m.max || 3) + " çalışıyor" + (m.queued ? " · " + m.queued + " sırada" : "");
   }
 
-  function macEvent(ev) {
-    if (ev.phase === "start") {
-      if (ev.source === "hermes") note("Hermes Mac'te iş başlattı: " + ev.task, "mac");
-      else note("Mac'te başladı (" + ev.cwd + ")", "mac");
-    } else if (ev.phase === "progress") {
-      note(/…$/.test(ev.text) ? ev.text : ev.text + "…", "mac");
-    } else if (ev.phase === "done") {
-      const head = ev.status === "done" ? "Celal (Mac)" : "Celal (Mac, " + (ev.status === "stopped" ? "durduruldu" : "hata") + ")";
-      bubble("mac", head + " · " + ev.seconds + " s", ev.text || ev.summary || "");
+  function stopFeedback(on, text) {
+    const b = $("stop");
+    if (on) {
+      clearTimeout(stopTimer); stopShownAt = Date.now();
+      b.classList.add("busy"); b.textContent = "durduruluyor…"; b.disabled = true;
+      stopTimer = setTimeout(() => stopFeedback(false), 12000);
+    } else {
+      const wait = Math.max(0, 700 - (Date.now() - stopShownAt));
+      clearTimeout(stopTimer);
+      stopTimer = setTimeout(() => { b.classList.remove("busy"); b.textContent = "■ Durdur"; b.disabled = false; }, wait);
     }
   }
+  function doStop() { stopFeedback(true); api() && api().interrupt(); }
 
   window.celalEvent = function (ev) {
     switch (ev.type) {
       case "status": status(ev); break;
-      case "user": bubble("me", (ev.source === "mic" ? "sen (ses)" : "sen") + (ev.mac ? " → Mac" : ""), ev.text); break;
-      case "assistant_start": current = null; break;
-      case "assistant_delta": {
-        if (!current) current = bubble("him", "Celal", "");
-        const stick = atBottom();
-        current.querySelector(".body").textContent += ev.text;
-        if (stick) log.scrollTop = log.scrollHeight;
+      case "history":
+        (ev.tabs || []).forEach((h) => {
+          const p = pane(h.tab_id); p.querySelectorAll(".msg,.note").forEach(n => n.remove());
+          (h.lines || []).forEach(ln => renderLine(h.tab_id, ln, true));
+          if (h.partial) { current[h.tab_id] = bubble(h.tab_id, "him", who(h.tab_id), h.partial); streamed[h.tab_id] = true; }
+        });
+        break;
+      case "tab_line": renderLine(ev.tab_id, ev.line, false); break;
+      case "tab_turn":
+        if (ev.phase === "start") { streamed[ev.tab_id] = false; current[ev.tab_id] = null; }
+        else { current[ev.tab_id] = null; }
+        break;
+      case "tab_delta": {
+        const id = ev.tab_id; streamed[id] = true;
+        if (!current[id]) {
+          if (!ev.text.trim()) break;
+          current[id] = bubble(id, "him" + (tabOf(id).kind === "hermes" ? " hermes" : ""), who(id), "");
+        }
+        const p = pane(id); const stick = atBottom(p);
+        const b = current[id].querySelector(".body");
+        b.textContent = (b.textContent + ev.text).replace(/^\s+/, "");
+        if (stick) p.scrollTop = p.scrollHeight;
         break;
       }
-      case "assistant_end":
-        if (current) { const b = current.querySelector(".body"); b.textContent = b.textContent.replace(/^\s+/, ""); }
-        if (ev.note === "kesildi" && current) note("(kesildi)");
-        current = null; break;
-      case "tool": note("araç çalışıyor: " + ev.name, "tool"); break;
-      case "mac": macEvent(ev); break;
-      case "error": note(ev.text, "err"); break;
-      case "info": note(ev.text); break;
-      case "wake": note(ev.text); break;
+      case "tab_break": current[ev.tab_id] = null; break;
+      case "stopping": stopFeedback(true); break;
+      case "stopped": note(ev.tab_id || activeId, ev.text, "stop"); stopFeedback(false); break;
+      case "timing": note(ev.tab_id, ev.text); break;
+      case "error": note(activeId, ev.text, "err"); break;
+      case "info": note(activeId, ev.text); break;
+      case "wake": note(activeId, ev.text); break;
       case "hotkey": hotkey = ev.spec; $("hint").textContent = micHint(); break;
     }
     return true;
   };
   window.celalEvents = function (evs) { evs.forEach(window.celalEvent); return true; };
 
-  function api() { return (window.pywebview && window.pywebview.api) || null; }
   function send() {
     const t = $("input").value.trim(); if (!t || !api()) return;
-    $("input").value = ""; autosize(); api().send_text(t, macMode);
+    $("input").value = ""; autosize(); api().send_text(t);
   }
   function autosize() { const i = $("input"); i.style.height = "auto"; i.style.height = Math.min(i.scrollHeight, 140) + "px"; }
   $("send").onclick = send;
   $("input").addEventListener("input", autosize);
   $("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); api() && api().interrupt(); } });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); doStop(); } });
   $("mic").onclick = () => api() && api().set_mic(!micOn);
-  $("stop").onclick = () => api() && api().interrupt();
-  $("newchat").onclick = () => api() && api().new_conversation();
-  $("macmode").onclick = () => api() && api().set_mac_mode(!macMode);
+  $("stop").onclick = doStop;
+  renderTabs();
   window.addEventListener("pywebviewready", () => {
     api().ready().then((evs) => { if (evs) window.celalEvents(evs); });
     $("input").focus();

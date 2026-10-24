@@ -1,26 +1,32 @@
 """Celal's engine, shared by the window and the terminal mode.
 
-Owns the SSH tunnel, the Hermes health check and one Pipecat pipeline
-(optional mic → Whisper → Hermes → EMA/say → speaker). Everything runs on one
-asyncio loop. The UI talks to it through ``send_text`` / ``set_mic`` /
-``interrupt`` / ``new_conversation`` and receives plain dict events via
-``emit``::
+Owns the SSH tunnel to Hermes (health checked), the tabs (:mod:`celal.tabs`:
+one Mac Claude Code or Hermes conversation each, up to ``max_parallel``
+answering at once), the Mac API for Hermes and one Pipecat pipeline that is
+only ears and mouth (mic → Whisper → turn → router; text → TTS → speaker).
 
-    {"type": "status", "state": "hazır|bekliyor|dinliyor|düşünüyor|konuşuyor",
-     "connected": bool, "conn": "bağlı|bağlı değil", "reason": str,
-     "tunnel": str, "mic": bool, "voice": bool,
-     "wake": {"on": bool, "active": bool, "start": str, "stop": str}}
-    {"type": "wake", "active": bool, "text": str}   # "Celal dinlemeye başla" / "Celal dinlemeyi durdur" heard
-    {"type": "user", "text": str}
-    {"type": "assistant_start"} / {"type": "assistant_delta", "text": str} / {"type": "assistant_end"}
-    {"type": "tool", "name": str}
-    {"type": "error", "text": str}
-    {"type": "info", "text": str}
-    {"type": "mac", "phase": "start|progress|done", ...}   # "Mac'te yap" task (mac_task.py)
+Routing (:func:`celal.mac_task.route`): every message goes to the **active
+tab**, which is the Mac's Claude Code unless it is a Hermes tab. "sunucuda …"
+/ "Hermes'e sor …" opens (or uses) a Hermes tab, "yeni görev …" a new tab.
 
-Turns carry an id (``_turn``). A reply stream is bound to the turn whose
-prompt it answers when it starts; events of an older, interrupted stream
-(its late "kesildi" end) never finish the newer turn.
+Speech: only the active tab's reply is spoken, sentence by sentence as it
+streams. A background tab that finishes says one short sentence ("README
+görevi bitti") and gets an unread dot. Durdur (:meth:`interrupt`) cuts the
+speech and stops the active tab's Mac task; work sent to Hermes is never
+cancelled from here.
+
+Events for the UI (plain dicts through ``emit``)::
+
+    {"type": "status", "state": "hazır|bekliyor|dinliyor|düşünüyor|konuşuyor", "connected": bool,
+     "conn": str, "reason": str, "tunnel": str, "mic": bool, "voice": bool, "wake": {...},
+     "tabs": [tab view...], "active": tab id, "mac": {"running", "queued", "max", "api", "reverse"}}
+    {"type": "tab_line", "tab_id": str, "line": {"role": "user|assistant|progress|info|error", "text": str, ...}}
+    {"type": "tab_delta", "tab_id": str, "text": str} / {"type": "tab_break", "tab_id": str}
+    {"type": "tab_turn", "tab_id": str, "phase": "start|end", "status": str, ...}
+    {"type": "stopping", "tab_id": str} / {"type": "stopped", "tab_id": str, "text": str}
+    {"type": "wake", "active": bool, "text": str}
+    {"type": "timing", "tab_id": str, "text": str}
+    {"type": "error", "text": str} / {"type": "info", "text": str}
 """
 
 from __future__ import annotations
@@ -32,28 +38,27 @@ from collections.abc import Callable
 from loguru import logger
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
-    TTSSpeakFrame,
     BotStoppedSpeakingFrame,
     InterruptionFrame,
     InterruptionWorkerFrame,
-    LLMMessagesAppendFrame,
-    TranscriptionFrame,
+    TTSSpeakFrame,
     UserStartedSpeakingFrame,
     UserStoppedSpeakingFrame,
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
-from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.workers.runner import WorkerRunner
 
+from celal.brains import TurnOutcome, make_brain_factory, scrub_parent_env
 from celal.config import Settings
 from celal.hermes import HermesClient
-from celal.llm_hermes import HermesLLMService
 from celal.mac_api import MacApiServer, ensure_token
-from celal.mac_task import MacBusy, MacTask, MacTaskRunner, parse_request, split_cwd
+from celal.mac_task import HERMES, MAC_FORCED, NEW, route, same_dir, spoken_summary, split_cwd
 from celal.pipeline import STT_MODELS, Built, Config, build_text, build_voice
-from celal.stt_filter import WhisperHallucinationFilter
+from celal.speech_text import SentenceBuffer
+from celal.tabs import MAC, QUEUED, RUNNING, Tab, TabManager, make_label
 from celal.tunnel import EXTERNAL, OPEN, ReverseTunnel, TunnelManager
-from celal.wake import START_PHRASE, STOP_PHRASE, ListenState, VoiceCommandGate
+from celal.wake import START_PHRASE, STOP_PHRASE, ListenState
 
 IDLE = "hazır"
 WAITING = "bekliyor"  # mic open, passive: only "Celal dinlemeye başla" is heard
@@ -64,6 +69,8 @@ SPEAKING = "konuşuyor"
 CONNECTED = "bağlı"
 DISCONNECTED = "bağlı değil"
 HERMES_DOWN = "Hermes yanıt vermiyor"
+
+MAX_SPOKEN_CHARS = 700  # per answer; the rest stays on screen ("Devamı ekranda.")
 
 
 class _FrameWatcher(BaseObserver):
@@ -76,15 +83,12 @@ class _FrameWatcher(BaseObserver):
         c = self.core
         if isinstance(f, BotStartedSpeakingFrame):
             c._bot_speaking = True
-            if c._speech_pending:
-                c._speech_started = True
+            c._on_first_audio()
         elif isinstance(f, BotStoppedSpeakingFrame):
             c._bot_speaking = False
             c._last_audio = time.monotonic()
-            if c._speech_pending and c._speech_started:
-                c._speech_finished()
         elif isinstance(f, InterruptionFrame):
-            if c._bot_speaking or c._llm_active:
+            if c._bot_speaking:
                 c.interruptions += 1
         elif isinstance(f, UserStartedSpeakingFrame):
             c._user_speaking = True
@@ -95,30 +99,19 @@ class _FrameWatcher(BaseObserver):
         c._refresh()
 
 
-class _TranscriptWatcher(BaseObserver):
-    """Reports what the user said, as it leaves the hallucination filter (or the voice command gate).
+class _Speech:
+    """The answer currently being spoken (one tab, one turn)."""
 
-    Every push is observed so the filtered text is used, not Whisper's raw
-    frame (which observers see first, before the echo gate and the filter).
-    With voice commands on, only what the gate lets through is a user message.
-    """
-
-    def __init__(self, core: CelalCore, source: type[FrameProcessor], **kwargs):
-        super().__init__(observe_every_push=True, **kwargs)
-        self.core = core
-        self.source = source
-
-    async def on_push_frame(self, data: FramePushed):
-        f = data.frame
-        if not isinstance(f, TranscriptionFrame) or not isinstance(data.source, self.source):
-            return
-        c = self.core
-        text = f.text.strip()
-        if not text or c.mac_request(text) is not None:
-            return  # spoken "Mac'te …": MacRouter hands it to the Mac task runner
-        c._begin_turn(None)  # the aggregator may join transcripts: accept any reply start
-        c.emit({"type": "user", "text": text, "source": "mic"})
-        c._refresh()
+    def __init__(self, tab_id: str):
+        self.tab_id = tab_id
+        self.buf = SentenceBuffer()
+        self.chars = 0
+        self.muted = False
+        self.said_anything = False
+        self.t0 = time.perf_counter()
+        self.first_text: float | None = None
+        self.first_audio: float | None = None
+        self.total: float | None = None
 
 
 class CelalCore:
@@ -134,9 +127,10 @@ class CelalCore:
         health_interval: float = 3.0,
         stall_after: int = 3,
         max_kick_backoff: int = 5,
-        mac_runner: MacTaskRunner | None = None,
+        brain_factory=None,
         mac_api: bool | None = None,
         reverse: ReverseTunnel | None = None,
+        warm_tabs: bool | None = None,
     ):
         self.settings = settings
         self.cfg = cfg
@@ -152,37 +146,35 @@ class CelalCore:
         self.connected = False
         self.reason = "başlıyor"
         self.mic = voice and cfg.mic_on_start
-        # Voice commands: an open mic starts passive ("bekliyor") until the start phrase.
         self.listen = ListenState(active=not cfg.wake, on_change=self._on_wake)
         self.state = IDLE
         self.built: Built | None = None
-        self.llm: HermesLLMService | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self._tasks: list[asyncio.Task] = []
         self._runner_task: asyncio.Task | None = None
         self._bot_speaking = False
         self._user_speaking = False
-        self._llm_active = False
-        self._awaiting_reply = False  # a prompt was sent, reply not yet fully spoken
-        self._awaiting_since = 0.0
         self._last_audio = 0.0
-        self._reply_text: list[str] = []
+        self._last_speak = 0.0
         self._last_status: dict | None = None
-        self.interruptions = 0  # replies cut off (by the user, the Sus button or echo)
-        self.turn_done = asyncio.Event()
+        self.interruptions = 0
         self.last_error: str | None = None
-        self._turn = 0  # id of the newest turn
-        self._turn_prompt: str | None = None  # its typed prompt (None: mic / any)
-        self._llm_turn: int | None = None  # turn the running reply stream answers
-        # "Mac'te yap"
-        self.mac = mac_runner or MacTaskRunner(
-            claude=settings.mac_claude,
-            default_cwd=settings.mac_cwd,
-            timeout=settings.mac_timeout,
+        self.warm_tabs = settings.mac_warm if warm_tabs is None else warm_tabs
+        if brain_factory is None:
+            scrub_parent_env()  # the Mac Claude must not inherit a parent Claude session / API billing
+            brain_factory = make_brain_factory(settings, self.client, self._ensure_connected)
+        self.tabs = TabManager(
+            brain_factory,
             max_parallel=settings.mac_max_parallel,
+            state_dir=settings.state_dir,
+            default_cwd=settings.mac_cwd,
+            idle_close=settings.mac_idle_close,
+            turn_timeout=settings.mac_timeout,
+            on_event=self._on_tab,
         )
-        self.mac._on_event = self._on_mac
-        self.mac_mode = False  # window toggle: every message goes to the Mac
+        self._speech: _Speech | None = None
+        self._timing_pending: _Speech | None = None
+        self.timings: list[dict] = []  # per answer: first_text / first_audio / total seconds
         self.mac_api_enabled = settings.mac_api if mac_api is None else mac_api
         self.mac_api: MacApiServer | None = None
         self.mac_api_status = "kapalı"
@@ -191,12 +183,6 @@ class CelalCore:
             self.reverse = ReverseTunnel(settings)
         if self.reverse is not None:
             self.reverse._on_status = self._on_tunnel
-        self.last_mac_task: MacTask | None = None
-        self.speech_done = asyncio.Event()
-        self.speech_done.set()
-        self._speech_pending = False
-        self._speech_started = False
-        self._speech_queued = 0.0
 
     # ---- events -------------------------------------------------------
     def emit(self, event: dict) -> None:
@@ -217,22 +203,28 @@ class CelalCore:
             "voice": self.voice,
             "wake": {"on": self.cfg.wake, "active": self.listen.active, "start": START_PHRASE, "stop": STOP_PHRASE},
             "conversation": self.client.conversation,
+            "tabs": self.tabs.views(),
+            "active": self.tabs.active_id,
             "mac": {
-                "busy": self.mac.busy,
-                "task": (self.mac.current.task[:80] if self.mac.current else ""),
-                "running": len(self.mac.running),
-                "tasks": [{"task_id": t.task_id, "task": t.task[:80], "source": t.source} for t in self.mac.running],
-                "mode": self.mac_mode,
+                "running": len(self.tabs.running),
+                "queued": len(self.tabs.queued),
+                "max": self.tabs.max_parallel,
                 "api": self.mac_api_status,
                 "reverse": (f"{self.reverse.status}" if self.reverse is not None else "kapalı"),
             },
         }
 
+    def history(self) -> list[dict]:
+        """Every tab's stored lines, for a page that (re)loads."""
+        return [{"tab_id": t.id, "lines": t.lines[-50:], "partial": "".join(t.reply) if t.status == RUNNING else ""}
+                for t in self.tabs.tabs.values()]
+
     def _compute_state(self) -> str:
         window = self.built.window if self.built else None
         if self._bot_speaking or (window is not None and window.closed):
             return SPEAKING
-        if self._llm_active or self._awaiting_reply:
+        active = self.tabs.active
+        if active is not None and active.status in (QUEUED, RUNNING):
             return THINKING
         if self.mic:
             return LISTENING if self.listen.active else WAITING
@@ -249,7 +241,6 @@ class CelalCore:
         self._refresh()
 
     def _on_wake(self, active: bool) -> None:
-        """Voice command heard (pipeline task): tell the UI, never Hermes."""
         text = (
             f"Dinleme açık. “{STOP_PHRASE}” deyince kapanır."
             if active
@@ -258,141 +249,265 @@ class CelalCore:
         self.emit({"type": "wake", "active": active, "text": text})
         self._refresh()
 
-    # ---- turns --------------------------------------------------------
-    def _begin_turn(self, prompt: str | None) -> int:
-        self._turn += 1
-        self._turn_prompt = prompt
-        self.turn_done.clear()
-        if self.built is not None:
-            self.built.reply.reset()
-        self._awaiting_reply = True
-        self._awaiting_since = self._last_audio = time.monotonic()  # "quiet" is measured from the turn start
-        return self._turn
+    # ---- tabs ---------------------------------------------------------
+    def _on_tab(self, kind: str, tab: Tab, data) -> None:
+        if kind == "tabs":
+            self._refresh()
+        elif kind == "line":
+            self.emit({"type": "tab_line", "tab_id": tab.id, "kind": tab.kind, "line": data})
+        elif kind == "delta":
+            self.emit({"type": "tab_delta", "tab_id": tab.id, "text": data})
+            self._speech_delta(tab, data)
+        elif kind == "break":
+            self.emit({"type": "tab_break", "tab_id": tab.id})
+            self._speech_delta(tab, "\n")
+        elif kind == "turn_start":
+            self.emit({"type": "tab_turn", "tab_id": tab.id, "phase": "start"})
+            if tab.id == self.tabs.active_id:
+                self._speech = _Speech(tab.id)
+        elif kind == "turn_end":
+            self._speech_end(tab, data)
+            self.emit({"type": "tab_turn", "tab_id": tab.id, "phase": "end", "status": tab.status})
 
-    def _finish_turn(self, turn: int | None = None) -> None:
-        if turn is not None and turn != self._turn:
-            return  # a stale stream (interrupted older turn) must not end the newer one
-        self._awaiting_reply = False
-        self.turn_done.set()
+    def _speech_delta(self, tab: Tab, text: str) -> None:
+        sp = self._speech
+        if sp is None or sp.tab_id != tab.id:
+            return
+        if sp.first_text is None and text.strip():
+            sp.first_text = time.perf_counter()
+        if sp.muted:
+            return
+        for sentence in sp.buf.feed(text):
+            self._say_sentence(sp, sentence)
+
+    def _say_sentence(self, sp: _Speech, sentence: str) -> None:
+        if sp.chars >= MAX_SPOKEN_CHARS:
+            sp.muted = True
+            self._queue_tts("Devamı ekranda.")
+            return
+        sp.chars += len(sentence)
+        sp.said_anything = True
+        self._queue_tts(sentence)
+
+    def _speech_end(self, tab: Tab, outcome: TurnOutcome) -> None:
+        sp = self._speech
+        if sp is not None and sp.tab_id == tab.id:
+            self._speech = None
+            if not sp.muted and not outcome.interrupted:
+                for sentence in sp.buf.flush():
+                    self._say_sentence(sp, sentence)
+                if not sp.said_anything:
+                    if not outcome.ok and outcome.error:
+                        self._queue_tts(f"Hata: {spoken_summary(outcome.error, 1, 160)}")
+                    elif outcome.text:
+                        self._queue_tts(spoken_summary(outcome.text))
+            sp.total = time.perf_counter() - sp.t0
+            if sp.said_anything and sp.first_audio is None and not outcome.interrupted:
+                self._timing_pending = sp  # reported when its first audio plays
+            else:
+                self._report_timing(sp)
+            return
+        if tab.id != self.tabs.active_id and tab.source == "celal" and not outcome.interrupted:
+            # A background tab finished: one short sentence, the tab gets an unread dot.
+            verb = "bitti" if outcome.ok else "hata verdi"
+            self._queue_tts(f"{tab.label} görevi {verb}.")
+
+    def _on_first_audio(self) -> None:
+        sp = self._speech
+        if sp is not None and sp.first_audio is None and sp.said_anything:
+            sp.first_audio = time.perf_counter()
+        pending, self._timing_pending = self._timing_pending, None
+        if pending is not None:
+            pending.first_audio = time.perf_counter()
+            self._report_timing(pending)
+
+    def _report_timing(self, sp: _Speech) -> None:
+        parts = []
+        if sp.first_text is not None:
+            parts.append(f"ilk kelime {sp.first_text - sp.t0:.1f} s")
+        if sp.first_audio is not None:
+            parts.append(f"ilk ses {sp.first_audio - sp.t0:.1f} s")
+        if sp.total is not None:
+            parts.append(f"tam cevap {sp.total:.1f} s")
+        self.timings.append({"first_text": sp.first_text and sp.first_text - sp.t0,
+                             "first_audio": sp.first_audio and sp.first_audio - sp.t0, "total": sp.total})
+        self.emit({"type": "timing", "tab_id": sp.tab_id, "text": "⏱ " + ", ".join(parts)})
+
+    def _queue_tts(self, text: str) -> None:
+        if self.built is None or not text.strip():
+            return
+        self._last_speak = time.monotonic()
+        self._tasks.append(asyncio.ensure_future(self.built.worker.queue_frame(TTSSpeakFrame(text=text))))
 
     @property
-    def turn_id(self) -> int:
-        return self._turn
+    def speaking(self) -> bool:
+        """Audio is playing, or a sentence was queued less than 1.5 s ago and has not started yet."""
+        return self._bot_speaking or (time.monotonic() - max(self._last_speak, 0) < 1.5
+                                      and self._last_speak > self._last_audio)
 
-    def _on_llm(self, kind: str, value: str) -> None:
-        if kind == "start":
-            if self._turn_prompt is None or value == self._turn_prompt:
-                self._llm_turn = self._turn
-            else:
-                self._llm_turn = None
-                logger.debug("reply stream for an older prompt started; it will not end the current turn")
-            self._llm_active = True
-            self._reply_text = []
-            self.emit({"type": "assistant_start"})
-        elif kind == "text":
-            self._reply_text.append(value)
-            self.emit({"type": "assistant_delta", "text": value})
-        elif kind == "tool":
-            self.emit({"type": "tool", "name": value})
-        elif kind == "error":
-            self.last_error = value
-            self.emit({"type": "error", "text": value})
-        elif kind == "end":
-            stream_turn, self._llm_turn = self._llm_turn, None
-            self._llm_active = False
-            self._last_audio = time.monotonic()
-            self.emit({"type": "assistant_end", "text": "".join(self._reply_text), "note": value})
-            if not self._reply_text and stream_turn is not None:
-                self._finish_turn(stream_turn)
-        self._refresh()
+    async def wait_quiet(self, timeout: float = 120.0) -> bool:
+        """Until nothing is spoken any more (text mode)."""
+        deadline = time.monotonic() + timeout
+        quiet_since = None
+        while time.monotonic() < deadline:
+            if self.speaking:
+                quiet_since = None
+            elif quiet_since is None:
+                quiet_since = time.monotonic()
+            elif time.monotonic() - quiet_since > 1.2:
+                return True
+            await asyncio.sleep(0.1)
+        return False
 
-    # ---- Mac tasks ----------------------------------------------------
-    def _on_mac(self, kind: str, task: MacTask) -> None:
-        if kind == "start":
-            self.emit({"type": "mac", "phase": "start", "task_id": task.task_id, "task": task.task,
-                       "cwd": task.cwd, "source": task.source})
-        elif kind == "progress":
-            self.emit({"type": "mac", "phase": "progress", "task_id": task.task_id, "text": task.progress[-1]})
-        elif kind == "done":
-            self.emit({"type": "mac", "phase": "done", "task_id": task.task_id, "status": task.status,
-                       "source": task.source, "text": task.result or task.error, "error": task.error,
-                       "summary": task.summary, "seconds": task.seconds})
-            if task.source != "hermes" and task.summary and self.loop is not None:
-                # Hermes-started tasks answer through Hermes; only our own are spoken here.
-                self._speech_begin()  # before the task runs: waiters must not see the old "done"
-                self._tasks.append(asyncio.ensure_future(self.say(task.summary)))
-        self._refresh()
+    async def _cut_speech(self) -> bool:
+        """Silence now; the current answer stays unspoken. True if something was (about to be) spoken."""
+        was = self.speaking
+        if self._speech is not None:
+            self._speech.muted = True
+        if self.built is not None:
+            await self.built.worker.queue_frame(InterruptionWorkerFrame(), FrameDirection.UPSTREAM)
+        self._last_speak = 0.0
+        return was
 
-    def mac_request(self, text: str, force: bool | None = None) -> tuple[str, str | None] | None:
-        """(task, cwd) when the text should run on the Mac, else None."""
-        parsed = parse_request(text, self.settings.mac_prefixes)
-        if parsed is not None:
-            return parsed if parsed[0] else None
-        if force or (force is None and self.mac_mode):
-            return split_cwd(text.strip())
-        return None
+    # ---- routing ------------------------------------------------------
+    def _ensure_connected(self):
+        async def check() -> bool:
+            if self.connected:
+                return True
+            ok, reason = await self.client.ping()
+            self.connected, self.reason = ok, reason
+            self._refresh()
+            return ok
 
-    async def run_mac_task(
-        self, task: str, cwd: str | None = None, *, shown: str | None = None, announce: bool = True
-    ) -> MacTask | None:
-        if announce:
-            self.emit({"type": "user", "text": shown or task, "source": "text", "mac": True})
-        try:
-            t = self.mac.start(task, cwd, source="celal")
-        except MacBusy as e:  # slot limit, or a writer already in that folder (MacConflict)
-            self.emit({"type": "error", "text": str(e)})
+        return check()
+
+    def _activate(self, tab: Tab) -> None:
+        if self.tabs.active_id != tab.id:
+            if self._speech is not None and self._speech.tab_id != tab.id:
+                self._tasks.append(asyncio.ensure_future(self._cut_speech()))
+                self._speech = None
+            self.tabs.set_active(tab.id)
+
+    def _new_tab(self, kind: str, text: str, *, cwd: str | None = None) -> Tab:
+        label = make_label(text, 3) if kind != MAC else make_label(text)
+        if kind != MAC:
+            label = f"Hermes: {label}"
+        tab = self.tabs.create(kind, label=label, cwd=cwd, activate=False)
+        self._activate(tab)
+        return tab
+
+    async def send_text(self, text: str, *, source: str = "text") -> Tab | None:
+        """Route a typed or spoken message to a tab (see the module docstring); None if nothing was sent."""
+        text = text.strip()
+        if not text:
             return None
-        except ValueError as e:
-            self.emit({"type": "error", "text": f"Mac'te çalıştırılamadı: {e}"})
-            return None
-        self.last_mac_task = t
-        return t
-
-    def _route_spoken(self, text: str) -> bool:
-        """MacRouter callback (pipeline task): True when the transcript is a Mac request."""
-        req = self.mac_request(text)
-        if req is None:
-            return False
-        self.emit({"type": "user", "text": text, "source": "mic", "mac": True})
-        self._tasks.append(asyncio.ensure_future(self.run_mac_task(req[0], req[1], shown=None, announce=False)))
-        return True
-
-    async def set_mac_mode(self, on: bool) -> None:
-        self.mac_mode = bool(on)
+        target, body = route(text, hermes_prefixes=self.settings.hermes_prefixes,
+                             new_tab_prefixes=self.settings.new_tab_prefixes,
+                             mac_prefixes=self.settings.mac_prefixes)
+        active = self.tabs.active
+        new = target == NEW
+        if new:
+            target, body = route(body, hermes_prefixes=self.settings.hermes_prefixes,
+                                 mac_prefixes=self.settings.mac_prefixes)
+        kind = "hermes" if target == HERMES else MAC
+        if new:
+            tab = None
+        elif target == HERMES:
+            tab = active if active is not None and active.kind == "hermes" else None
+        elif active is not None and active.kind == MAC:
+            tab = active  # the default: the Mac's Claude Code in the active tab
+        else:
+            # Mac first: an unprefixed message never goes to Hermes, even from a Hermes tab.
+            # Back to the latest idle Mac tab, else a new one.
+            idle = [t for t in self.tabs.tabs.values() if t.kind == MAC and not t.busy]
+            tab = max(idle, key=lambda t: t.updated) if idle else None
+        _, cwd = split_cwd(body) if kind == MAC else (body, None)
+        if tab is not None and cwd and tab.turns == 0 and not tab.lines and not same_dir(cwd, tab.cwd):
+            # A fresh tab, but the first message names another folder: start Claude there instead.
+            empty, tab = tab, None
+            await self.tabs.close(empty.id)
+        if tab is None:
+            tab = self._new_tab(kind, body, cwd=cwd)
+        self._activate(tab)
+        logger.info(f"[{tab.kind}] sekme “{tab.label}” ← {body[:80]}")
+        self.tabs.submit(tab, body)
         self._refresh()
+        return tab
 
-    async def say(self, text: str) -> None:
-        """Speak a fixed text (Mac task summary) through the pipeline's TTS."""
-        if self.built is None or not text.strip():
-            self._speech_finished()
+    def _route_spoken(self, text: str) -> None:
+        """Voice pipeline (TurnSink): a finished spoken turn."""
+        self._tasks.append(asyncio.ensure_future(self.send_text(text, source="mic")))
+
+    async def new_tab(self) -> Tab:
+        tab = self.tabs.create(MAC, activate=False)
+        self._activate(tab)
+        if self.warm_tabs:
+            self.tabs.warm(tab)
+        self._refresh()
+        return tab
+
+    async def select_tab(self, tab_id: str) -> None:
+        tab = self.tabs.get(tab_id)
+        if tab is None:
             return
-        self._speech_begin()
-        await self.built.worker.queue_frame(TTSSpeakFrame(text=text))
+        self._activate(tab)
+        if self.warm_tabs and tab.kind == MAC and tab.brain is None and not tab.busy:
+            self.tabs.warm(tab)
+        self._refresh()
 
-    def _speech_begin(self) -> None:
-        self._speech_pending = True
-        self._speech_started = self._bot_speaking  # queued behind a reply that is still playing
-        self._speech_queued = time.monotonic()
-        self.speech_done.clear()
+    async def close_tab(self, tab_id: str) -> None:
+        if self._speech is not None and self._speech.tab_id == tab_id:
+            await self._cut_speech()
+            self._speech = None
+        await self.tabs.close(tab_id)
+        if not self.tabs.tabs:
+            await self.new_tab()
+        self._refresh()
 
-    def _speech_finished(self) -> None:
-        self._speech_pending = False
-        self._speech_started = False
-        self.speech_done.set()
+    # ---- Durdur -------------------------------------------------------
+    async def interrupt(self) -> dict:
+        """Durdur: silence now, stop the active tab's Mac task. Hermes / server work is never cancelled."""
+        tab = self.tabs.active
+        tab_id = tab.id if tab else None
+        self.emit({"type": "stopping", "tab_id": tab_id})
+        spoke = await self._cut_speech()
+        result: dict = {"speech": spoke, "stopped": False, "dropped": 0, "server": False}
+        if tab is not None and tab.busy:
+            if tab.kind == MAC:
+                result.update(await self.tabs.stop(tab))
+            else:
+                result.update(await self.tabs.stop(tab))  # drops its queued messages only
+                result["server"] = True
+        parts = []
+        if result.get("stopped"):
+            parts.append("Mac görevi durduruldu")
+        if result.get("server"):
+            parts.append("sunucudaki iş sürüyor (Durdur sunucuya iptal göndermez)")
+        if spoke:
+            parts.append("ses kesildi")
+        if result.get("dropped"):
+            parts.append(f"sıradaki {result['dropped']} mesaj iptal")
+        text = ("Durduruldu: " + ", ".join(parts) + ".") if parts else "Durduracak bir şey yoktu."
+        text = text[0].upper() + text[1:]
+        result["text"] = text
+        self.emit({"type": "stopped", "tab_id": tab_id, "text": text})
+        self._refresh()
+        return result
 
     # ---- lifecycle ----------------------------------------------------
     async def start(self, warm: bool = True) -> None:
         self.loop = asyncio.get_running_loop()
         self.tunnel.start()
-        self.llm = HermesLLMService(self.client, on_event=self._on_llm)
+        restored = self.tabs.restore()
+        if not self.tabs.tabs:
+            self.tabs.create(MAC)
+        logger.info(f"sekmeler: {len(self.tabs.tabs)} ({restored} geri geldi)")
         cfg = self.cfg
         if not self.voice:
-            self.built = build_text(cfg, self.llm, observers=[_FrameWatcher(self)])
+            self.built = build_text(cfg, observers=[_FrameWatcher(self)])
         else:
             listen = self.listen if cfg.wake else None
-            source = VoiceCommandGate if listen is not None else WhisperHallucinationFilter
-            watchers = [_FrameWatcher(self), _TranscriptWatcher(self, source)]
-            self.built = build_voice(cfg, self.llm, observers=watchers, mac_route=self._route_spoken, listen=listen)
+            self.built = build_voice(cfg, self._route_spoken, observers=[_FrameWatcher(self)], listen=listen)
         started = asyncio.Event()
 
         @self.built.worker.event_handler("on_pipeline_started")
@@ -407,6 +522,9 @@ class CelalCore:
             await self._start_mac_api()
         self._tasks.append(asyncio.create_task(self._tick(), name="state-tick"))
         await asyncio.wait_for(started.wait(), timeout=60)
+        active = self.tabs.active
+        if self.warm_tabs and active is not None and active.kind == MAC:
+            self.tabs.warm(active)  # Claude's CLI starts now, not at the first message
         if warm:
             t = time.perf_counter()
             try:
@@ -421,17 +539,23 @@ class CelalCore:
     async def _start_mac_api(self) -> None:
         try:
             token = ensure_token(self.settings.mac_api_key_file)
-            self.mac_api = MacApiServer(self.mac, token, port=self.settings.mac_api_port)
+            self.mac_api = MacApiServer(self.tabs, token, port=self.settings.mac_api_port,
+                                        on_request=self._on_api_request)
             await self.mac_api.start()
             self.mac_api_status = f"127.0.0.1:{self.mac_api.port}"
         except OSError as e:
             self.mac_api = None
             self.mac_api_status = "açılamadı"
-            self.emit({"type": "error", "text": f"Mac API açılamadı (127.0.0.1:{self.settings.mac_api_port}): {e.strerror or e}. "
-                       "Hermes → Mac kapalı; başka bir Celal açık olabilir."})
+            self.emit({"type": "error", "text": f"Mac API açılamadı (127.0.0.1:{self.settings.mac_api_port}): "
+                       f"{e.strerror or e}. Hermes → Mac kapalı; başka bir Celal açık olabilir."})
             return
         if self.reverse is not None:
             self.reverse.start()
+
+    def _on_api_request(self, kind: str, data: dict) -> None:
+        if kind == "task":
+            logger.info(f"[mac] Hermes'ten görev (📱 {data.get('tab_id')}): {str(data.get('task'))[:80]}")
+            self._refresh()
 
     async def _warm_whisper(self) -> None:
         repo = STT_MODELS[self.cfg.stt]
@@ -456,8 +580,6 @@ class CelalCore:
         while True:
             ok, reason = await self.client.ping()
             if not ok and self.tunnel.status in (OPEN, EXTERNAL):
-                # ssh is up, the server's API is not answering: say so instead of
-                # blaming the tunnel (restarting it does not help much).
                 reason = f"{HERMES_DOWN}: {reason}"
             if ok != self.connected or reason != self.reason:
                 if ok != self.connected:
@@ -470,31 +592,15 @@ class CelalCore:
             elif self.tunnel.status == OPEN:
                 fails += 1
                 if fails >= self.kick_threshold():
-                    # Maybe the tunnel hangs; restart it, but back off when it does
-                    # not help (Hermes itself down): 9 s, 18 s, 36 s … ~5 min apart.
                     self.tunnel.kick("(sağlık kontrolü cevapsız)")
                     self.kicks_since_ok += 1
                     fails = 0
             await asyncio.sleep(self.health_interval)
 
     async def _tick(self) -> None:
-        """Settle 'düşünüyor' when a reply produced text but no audio (TTS failure)."""
         while True:
             await asyncio.sleep(0.3)
-            now = time.monotonic()
-            if self._awaiting_reply and not self._llm_active and not self._bot_speaking:
-                quiet = now - self._last_audio
-                if quiet > 1.0 and now - self._awaiting_since > 1.0 and self._reply_text_spoken_or_lost(quiet):
-                    self._finish_turn()
-            if self._speech_pending and not self._bot_speaking and now - self._speech_queued > 15.0:
-                self._speech_finished()  # TTS produced nothing (error) or no audio events
             self._refresh()
-
-    def _reply_text_spoken_or_lost(self, quiet: float) -> bool:
-        reply = self.built.reply if self.built else None
-        if reply is not None and reply.done(settle=0.8):
-            return True
-        return quiet > 8.0
 
     async def wait_connected(self, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
@@ -514,9 +620,9 @@ class CelalCore:
             t.cancel()
         try:
             try:
-                await self.mac.shutdown()
+                await self.tabs.shutdown()
             except Exception as e:  # noqa: BLE001
-                logger.debug(f"mac shutdown: {e}")
+                logger.debug(f"tabs shutdown: {e}")
             if self.mac_api is not None:
                 await self.mac_api.stop()
             if self.reverse is not None:
@@ -536,52 +642,6 @@ class CelalCore:
             await self.client.aclose()
 
     # ---- actions ------------------------------------------------------
-    @property
-    def busy(self) -> bool:
-        return self._llm_active or self._bot_speaking or self._awaiting_reply
-
-    async def _interrupt_speech(self) -> None:
-        if self.built is None:
-            return
-        await self.built.worker.queue_frame(InterruptionWorkerFrame(), FrameDirection.UPSTREAM)
-        self._awaiting_reply = False
-        self._refresh()
-
-    async def interrupt(self) -> None:
-        """Durdur: stop speaking, cancel the Hermes request, kill every running Mac task."""
-        await self._interrupt_speech()
-        if self.mac.busy:
-            await self.mac.stop()  # all of them: the window has one Durdur button
-            self._refresh()
-
-    async def send_text(self, text: str, mac: bool | None = None) -> bool:
-        """Send a typed message to Hermes, or run it on the Mac ("Mac'te …" / toggle / ``mac=True``)."""
-        text = text.strip()
-        if not text or self.built is None:
-            return False
-        req = self.mac_request(text, mac)
-        if req is not None:
-            return await self.run_mac_task(req[0], req[1], shown=text) is not None
-        if not self.connected:
-            ok, reason = await self.client.ping()
-            self.connected, self.reason = ok, reason
-            if not ok:
-                self._refresh()
-                self.emit({"type": "error", "text": f"Sunucuya bağlı değil: {reason}. Mesaj gönderilmedi."})
-                return False
-        if self.busy:
-            await self._interrupt_speech()
-            await asyncio.sleep(0.1)  # let the interruption reach the LLM before the new prompt
-        self.emit({"type": "user", "text": text, "source": "text"})
-        self.last_error = None
-        self._begin_turn(text)
-        self.built.timer.prompt_submitted()
-        self._refresh()
-        await self.built.worker.queue_frame(
-            LLMMessagesAppendFrame(messages=[{"role": "user", "content": text}], run_llm=True)
-        )
-        return True
-
     async def set_mic(self, on: bool) -> None:
         if not self.voice or self.built is None:
             self.emit({"type": "error", "text": "Mikrofon bu modda yok."})
@@ -600,16 +660,10 @@ class CelalCore:
             self.listen.set_active(False)  # every mic open starts passive, like a fresh "Hey Siri"
         self._refresh()
 
-    async def new_conversation(self) -> None:
-        if self.busy:
-            await self._interrupt_speech()
-        name = self.client.new_conversation()
-        self.emit({"type": "info", "text": f"Yeni sohbet: {name}"})
-        self._refresh()
-
     # ---- thread bridge (UI threads) -----------------------------------
     def call(self, coro) -> None:
         """Schedule a coroutine on the core loop from another thread."""
         if self.loop is None:
+            coro.close()
             return
         asyncio.run_coroutine_threadsafe(coro, self.loop)
