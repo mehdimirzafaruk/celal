@@ -45,6 +45,21 @@ async def _run_text(settings, cfg, args) -> int:
             print(f"[bilgi] {ev['text']}", flush=True)
         elif kind == "user" and ev.get("source") == "mic":
             print(f"[sen (ses)] {ev['text']}", flush=True)
+        elif kind == "mac":
+            phase = ev.get("phase")
+            if phase == "start":
+                who = "Hermes'ten" if ev.get("source") == "hermes" else "Celal'den"
+                print(f"[mac] {who} görev başladı ({ev.get('cwd')}): {ev.get('task')}", flush=True)
+            elif phase == "progress":
+                line = ev.get("text") or ""
+                print(f"[mac] {line if line.endswith('…') else line + '…'}", flush=True)
+            elif phase == "done":
+                print(f"[mac] bitti: {ev.get('status')}, {ev.get('seconds')} s", flush=True)
+                body = (ev.get("text") or "").strip()
+                if body:
+                    print(f"[mac sonuç]\n{body}", flush=True)
+                if ev.get("summary") and ev.get("source") != "hermes":
+                    print(f"[mac özet, sesli] {ev['summary']}", flush=True)
 
     cfg.print_sentences = False
     voice = bool(args.mic)  # --text --mic: mic open too (speaker test / terminal voice chat)
@@ -62,6 +77,8 @@ async def _run_text(settings, cfg, args) -> int:
             print(f"Hermes'e bağlı ({settings.api}, sohbet: {core.client.conversation}).", flush=True)
         else:
             print(f"[hata] Hermes'e bağlanılamadı: {core.reason} (tünel: {core.tunnel.status} {core.tunnel.detail})", flush=True)
+        if core.mac_api is not None:
+            print(f"Mac API: {core.mac_api_status} (Hermes → Mac, ters tünel ayrı ssh ile)", flush=True)
         interactive = sys.stdin.isatty()
         lines = _stdin_lines()
         while True:
@@ -79,6 +96,25 @@ async def _run_text(settings, cfg, args) -> int:
             cut_before = core.interruptions
             out = core.built.transport.output() if core.built else None
             bytes_before = getattr(out, "bytes_written", 0)
+            mac_req = core.mac_request(text)
+            if mac_req is not None:
+                task = await core.run_mac_task(mac_req[0], mac_req[1], shown=text)
+                if task is None:
+                    code = 1
+                    continue
+                if not await task.wait(settings.mac_timeout + 30):
+                    print("[hata] Mac görevi zaman aşımına uğradı", flush=True)
+                    code = 1
+                    continue
+                if task.status != "done":
+                    code = 1
+                try:
+                    await asyncio.wait_for(core.speech_done.wait(), timeout=120)
+                except TimeoutError:
+                    print("[hata] özet okunamadı (zaman aşımı)", flush=True)
+                spoken = (getattr(out, "bytes_written", 0) - bytes_before) / (OUT_RATE * 2)
+                print(f"[ses] {spoken:.1f} s okundu", flush=True)
+                continue
             if not await core.send_text(text):
                 code = 1
                 continue

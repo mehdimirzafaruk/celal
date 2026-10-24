@@ -19,9 +19,11 @@ from pipecat.frames.frames import (
     TTSStoppedFrame,
 )
 from pipecat.observers.base_observer import BaseObserver, FramePushed
+from pipecat.frames.frames import Frame, TranscriptionFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
@@ -138,6 +140,28 @@ class ReplyTracker(BaseObserver):
         return self.llm_ended and not self.bot_speaking and idle and bool(self.errors)
 
 
+class MacRouter(FrameProcessor):
+    """Spoken "Mac'te …" requests go to the Mac task runner instead of Hermes.
+
+    ``route(text)`` returns True when it took the transcript; the frame is
+    then not passed on to the user aggregator.
+    """
+
+    def __init__(self, route: Callable[[str], bool], **kwargs):
+        super().__init__(**kwargs)
+        self._route = route
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, TranscriptionFrame) and frame.text.strip():
+            try:
+                if self._route(frame.text.strip()):
+                    return
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"mac router: {e}")
+        await self.push_frame(frame, direction)
+
+
 @dataclass
 class Built:
     worker: PipelineWorker
@@ -164,7 +188,12 @@ def _worker(pipeline: Pipeline, observers: list[BaseObserver]) -> PipelineWorker
     )
 
 
-def build_voice(cfg: Config, llm: HermesLLMService, observers: list[BaseObserver] | None = None) -> Built:
+def build_voice(
+    cfg: Config,
+    llm: HermesLLMService,
+    observers: list[BaseObserver] | None = None,
+    mac_route: Callable[[str], bool] | None = None,
+) -> Built:
     """Mic → Silero VAD + Smart Turn v3 → Whisper (tr) → Hermes → TTS → speaker."""
     transport = SoundDeviceTransport(
         SoundDeviceTransportParams(
@@ -202,6 +231,7 @@ def build_voice(cfg: Config, llm: HermesLLMService, observers: list[BaseObserver
             stt,
             *gate_stt,
             WhisperHallucinationFilter(),
+            *([MacRouter(mac_route)] if mac_route else []),
             aggregators.user(),
             llm,
             tts,

@@ -69,8 +69,13 @@ class Api:
     def ready(self):
         return self._bridge.mark_ready(self._core.snapshot())
 
-    def send_text(self, text: str):
-        self._core.call(self._core.send_text(str(text)))
+    def send_text(self, text: str, mac: bool = False):
+        # mac=True: the "Mac'te çalıştır" toggle is on; "Mac'te …" prefixes work either way.
+        self._core.call(self._core.send_text(str(text), mac=True if mac else None))
+        return True
+
+    def set_mac_mode(self, on: bool):
+        self._core.call(self._core.set_mac_mode(bool(on)))
         return True
 
     def set_mic(self, on: bool):

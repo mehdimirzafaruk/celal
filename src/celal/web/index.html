@@ -56,12 +56,18 @@
   button:disabled { opacity: .45; cursor: default; }
   .tools { display: flex; gap: 6px; }
   .tools button { height: 26px; font-size: 12px; padding: 0 9px; }
+  button.macmode.on { background: #2d2410; border-color: var(--warn); color: #ffe2a8; }
+  .msg.mac { align-self: flex-start; background: #1d1a12; border: 1px solid #4a3d1c; border-bottom-left-radius: 4px; }
+  .note.mac { color: #d9b56a; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+  #macpill { display: none; } #macpill.on { display: inline-flex; color: var(--warn); border-color: #5a4a22; }
+  #macpill.on .dot { background: var(--warn); animation: pulse 1s infinite; }
 </style>
 </head>
 <body>
 <header>
   <h1>Celal</h1>
   <span id="conn" class="pill bad"><span class="dot"></span><span id="conn-text">bağlı değil</span></span>
+  <span id="macpill" class="pill" title="Mac'te Claude Code çalışıyor"><span class="dot"></span>Mac</span>
   <span id="state" class="pill"><span class="dot"></span><span id="state-text">hazır</span></span>
 </header>
 <div id="reason">başlıyor…</div>
@@ -69,8 +75,9 @@
 <footer>
   <div style="display:flex;flex-direction:column;gap:6px;flex:1">
     <div class="tools">
-      <button id="stop" class="stop" title="Konuşmayı durdurur, sunucudaki isteği iptal eder">■ Durdur</button>
+      <button id="stop" class="stop" title="Konuşmayı durdurur, sunucudaki isteği iptal eder, Mac'teki işi öldürür">■ Durdur</button>
       <button id="newchat" title="Sunucuda yeni sohbet başlat">Yeni sohbet</button>
+      <button id="macmode" class="macmode" title="Açıkken mesajlar Hermes yerine Mac'teki Claude Code'a gider. Kapalıyken de &quot;Mac'te …&quot; ile başlayan mesajlar Mac'te çalışır.">Mac'te çalıştır</button>
       <span class="hint" id="hint">Mikrofon kapalı</span>
     </div>
     <div style="display:flex;gap:8px;align-items:flex-end">
@@ -86,6 +93,7 @@
   const log = $("log");
   let current = null;   // assistant bubble being streamed
   let micOn = false;
+  let macMode = false;
   let hotkey = "";
   const STATE_CLASS = { "dinliyor": "listening", "düşünüyor": "thinking", "konuşuyor": "speaking" };
 
@@ -110,12 +118,29 @@
     mic.classList.toggle("on", micOn); $("mic-text").textContent = micOn ? "Dinliyor" : "Dinle";
     mic.disabled = !s.voice;
     $("hint").textContent = (micOn ? "Mikrofon AÇIK" : "Mikrofon kapalı") + (hotkey ? " · " + hotkey : "");
+    const mac = s.mac || {};
+    macMode = !!mac.mode; $("macmode").classList.toggle("on", macMode);
+    $("macpill").classList.toggle("on", !!mac.busy);
+    $("macpill").title = mac.busy ? "Mac'te çalışıyor: " + mac.task : "";
+    $("input").placeholder = macMode ? "Mac'te çalıştırılacak görev… (Claude Code, izinsiz mod)" : "Celal'e yaz… (Enter gönderir, Shift+Enter satır)";
+  }
+
+  function macEvent(ev) {
+    if (ev.phase === "start") {
+      if (ev.source === "hermes") note("Hermes Mac'te iş başlattı: " + ev.task, "mac");
+      else note("Mac'te başladı (" + ev.cwd + ")", "mac");
+    } else if (ev.phase === "progress") {
+      note(/…$/.test(ev.text) ? ev.text : ev.text + "…", "mac");
+    } else if (ev.phase === "done") {
+      const head = ev.status === "done" ? "Celal (Mac)" : "Celal (Mac, " + (ev.status === "stopped" ? "durduruldu" : "hata") + ")";
+      bubble("mac", head + " · " + ev.seconds + " s", ev.text || ev.summary || "");
+    }
   }
 
   window.celalEvent = function (ev) {
     switch (ev.type) {
       case "status": status(ev); break;
-      case "user": bubble("me", ev.source === "mic" ? "sen (ses)" : "sen", ev.text); break;
+      case "user": bubble("me", (ev.source === "mic" ? "sen (ses)" : "sen") + (ev.mac ? " → Mac" : ""), ev.text); break;
       case "assistant_start": current = null; break;
       case "assistant_delta": {
         if (!current) current = bubble("him", "Celal", "");
@@ -129,6 +154,7 @@
         if (ev.note === "kesildi" && current) note("(kesildi)");
         current = null; break;
       case "tool": note("araç çalışıyor: " + ev.name, "tool"); break;
+      case "mac": macEvent(ev); break;
       case "error": note(ev.text, "err"); break;
       case "info": note(ev.text); break;
       case "hotkey": hotkey = ev.spec; $("hint").textContent = (micOn ? "Mikrofon AÇIK" : "Mikrofon kapalı") + " · " + hotkey; break;
@@ -140,7 +166,7 @@
   function api() { return (window.pywebview && window.pywebview.api) || null; }
   function send() {
     const t = $("input").value.trim(); if (!t || !api()) return;
-    $("input").value = ""; autosize(); api().send_text(t);
+    $("input").value = ""; autosize(); api().send_text(t, macMode);
   }
   function autosize() { const i = $("input"); i.style.height = "auto"; i.style.height = Math.min(i.scrollHeight, 140) + "px"; }
   $("send").onclick = send;
@@ -150,6 +176,7 @@
   $("mic").onclick = () => api() && api().set_mic(!micOn);
   $("stop").onclick = () => api() && api().interrupt();
   $("newchat").onclick = () => api() && api().new_conversation();
+  $("macmode").onclick = () => api() && api().set_mac_mode(!macMode);
   window.addEventListener("pywebviewready", () => {
     api().ready().then((evs) => { if (evs) window.celalEvents(evs); });
     $("input").focus();

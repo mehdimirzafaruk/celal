@@ -39,3 +39,16 @@ def test_settings_without_config_file(tmp_path):
 def test_bad_api_mode(tmp_path):
     with pytest.raises(ValueError):
         load_settings(env={"CELAL_API": "x"}, config_path=tmp_path / "yok.toml")
+
+
+def test_mac_settings(tmp_path):
+    s = load_settings(env={}, config_path=tmp_path / "yok.toml")
+    assert "Mac'te" in s.mac_prefixes and "bilgisayarda" in s.mac_prefixes
+    assert (s.mac_cwd, s.mac_api, s.mac_api_port) == ("~", True, 8643)
+    assert s.mac_api_key_file.endswith("mac-api-key")
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('[mac]\nprefixes = ["Bilgisayar:"]\ncwd = "~/Kod"\napi = false\napi_port = 9643\ntimeout = 60\n')
+    s = load_settings(env={}, config_path=cfg)
+    assert (s.mac_prefixes, s.mac_cwd, s.mac_api, s.mac_api_port, s.mac_timeout) == (["Bilgisayar:"], "~/Kod", False, 9643, 60.0)
+    s = load_settings(env={"CELAL_MAC_API": "1", "CELAL_MAC_PREFIXES": "a, b"}, config_path=cfg)
+    assert s.mac_api is True and s.mac_prefixes == ["a", "b"]

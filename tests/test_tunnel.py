@@ -151,3 +151,77 @@ async def test_cancelled_tunnel_task_kills_ssh(settings):
     except asyncio.CancelledError:
         pass
     assert world.procs[0].killed
+
+
+# ---- review finding: ssh alive but the port never opens ----
+
+
+async def test_port_never_opens_restarts_with_backoff(settings):
+    world, statuses = World(), []
+
+    async def never_open(port):
+        return False
+
+    tm = TunnelManager(settings, spawn=world.spawn, port_open=never_open, backoff=(0.01,), open_timeout=0.2,
+                       on_status=lambda s, d: statuses.append((s, d)))
+    tm.start()
+    await wait_for(lambda: len(world.procs) >= 2, timeout=3)
+    assert world.procs[0].terminated  # the hung ssh was stopped, not left in "bağlanıyor"
+    assert any(s == DROPPED and "açılmadı" in d for s, d in statuses)
+    await tm.stop()
+    assert tm.status == STOPPED
+
+
+# ---- reverse tunnel (Hermes → Mac API) ----
+
+
+class ErrProc(FakeProc):
+    def __init__(self, err=b""):
+        super().__init__()
+
+        class _S:
+            async def read(self_inner):
+                return err
+
+        self.stderr = _S()
+
+
+async def test_reverse_tunnel_command_and_open(settings):
+    from celal.tunnel import ReverseTunnel, reverse_ssh_command
+
+    args = reverse_ssh_command(settings)
+    assert args[:4] == ["ssh", "-N", "-R", "127.0.0.1:8643:127.0.0.1:8643"]
+    assert "ExitOnForwardFailure=yes" in args and "BatchMode=yes" in args
+    world = World()
+    rt = ReverseTunnel(settings, spawn=world.spawn, settle=0.05, backoff=(0.01,))
+    rt.start()
+    await wait_for(lambda: rt.status == OPEN)
+    world.procs[0].exit(255)
+    await wait_for(lambda: len(world.procs) == 2 and rt.status == OPEN)
+    await rt.stop()
+    assert world.procs[1].terminated and rt.status == STOPPED
+
+
+async def test_reverse_tunnel_cleans_stale_remote_port_once(settings):
+    from celal.tunnel import ReverseTunnel
+
+    procs, cleanups = [], []
+
+    async def spawn(args):
+        # first two attempts: the server still holds the port; then it works
+        p = ErrProc(b"Error: remote port forwarding failed for listen port 8643\n") if len(procs) < 2 else FakeProc()
+        procs.append(p)
+        if len(procs) <= 2:
+            p.exit(255)
+        return p
+
+    async def cleanup(args):
+        cleanups.append(args)
+        return 0
+
+    rt = ReverseTunnel(settings, spawn=spawn, run_cleanup=cleanup, settle=0.05, backoff=(0.01,))
+    rt.start()
+    await wait_for(lambda: rt.status == OPEN, timeout=3)
+    assert len(cleanups) == 1  # once per failure streak, not on every retry
+    assert "kill" in cleanups[0][-1] and "8643" in cleanups[0][-1]
+    await rt.stop()
