@@ -21,7 +21,8 @@ Example ``~/.config/celal/config.toml``::
     hotkey = "ctrl+space"      # mikrofonu aç/kapat; "off" kapatır
 
     [mac]                      # varsayılan beyin: Mac'teki Claude Code (sekme başına bir oturum)
-    model = "sonnet"           # "opus" da olur
+    model = "fable"            # limit dolunca fallback_model devralır
+    fallback_model = "opus"
     cwd = "~"                  # varsayılan çalışma klasörü
     claude = "claude"          # yol ya da PATH'teki ad (~/.local/bin de aranır)
     timeout = 1800             # bir cevap için en çok saniye
@@ -66,7 +67,8 @@ class Settings:
     new_tab_prefixes: list[str] = field(default_factory=lambda: list(DEFAULT_NEW_TAB_PREFIXES))
     # The default brain: the Mac's own Claude Code, one persistent session per tab
     mac_prefixes: list[str] = field(default_factory=lambda: list(DEFAULT_MAC_PREFIXES))
-    mac_model: str = "sonnet"
+    mac_model: str = "fable"
+    mac_fallback_model: str = "opus"  # used while the main model's limit is full
     mac_cwd: str = "~"
     mac_claude: str = "claude"
     mac_timeout: float = 1800.0
@@ -117,6 +119,9 @@ def load_settings(env: Mapping[str, str] | None = None, config_path: str | Path 
         s.hermes_prefixes = [str(p).strip() for p in hermes["prefixes"] if str(p).strip()]
     mac = data.get("mac", {})
     s.mac_model = env.get("CELAL_MAC_MODEL") or mac.get("model") or s.mac_model
+    s.mac_fallback_model = (
+        env.get("CELAL_MAC_FALLBACK_MODEL") or mac.get("fallback_model") or s.mac_fallback_model
+    )
     s.mac_idle_close = float(env.get("CELAL_MAC_IDLE_CLOSE") or mac.get("idle_close") or s.mac_idle_close)
     if "CELAL_MAC_WARM" in env:
         s.mac_warm = _bool(env["CELAL_MAC_WARM"])

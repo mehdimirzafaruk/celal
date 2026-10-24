@@ -139,6 +139,31 @@ class _Inbox:
         self._items = deque(i for i in self._items if i is not _ABORT)
 
 
+# While the main model's usage limit is full, every tab starts on the fallback model.
+_LIMIT_UNTIL: dict[str, float] = {}
+LIMIT_DEFAULT_BLOCK = 30 * 60  # seconds, when the CLI does not say when the limit resets
+
+
+def _limit_blocked(model: str | None) -> bool:
+    import time
+
+    return bool(model) and _LIMIT_UNTIL.get(model, 0) > time.time()
+
+
+def _block_model(model: str | None, resets_at: float | None = None) -> None:
+    import time
+
+    if model:
+        _LIMIT_UNTIL[model] = float(resets_at) if resets_at else time.time() + LIMIT_DEFAULT_BLOCK
+
+
+def looks_like_limit(text: str | None, status: int | None = None) -> bool:
+    if status == 429:
+        return True
+    t = (text or "").lower()
+    return "limit" in t and any(w in t for w in ("usage", "rate", "hit", "reached", "reset"))
+
+
 class MacClaudeBrain(Brain):
     """The Mac's Claude Code through one persistent ``ClaudeSDKClient``.
 
@@ -159,7 +184,8 @@ class MacClaudeBrain(Brain):
         self,
         *,
         cwd: str,
-        model: str | None = "sonnet",
+        model: str | None = "fable",
+        fallback_model: str | None = "opus",
         claude: str = "claude",
         session_id: str | None = None,
         append_prompt: str | None = None,
@@ -168,7 +194,13 @@ class MacClaudeBrain(Brain):
         abort_grace: float = 3.0,
     ):
         self.cwd = os.path.expanduser(cwd)
-        self.model = model or None
+        self.primary_model = model or None
+        self.fallback_model = fallback_model or None
+        self.model = self.primary_model
+        if self.fallback_model and _limit_blocked(self.primary_model):
+            self.model = self.fallback_model
+        self._limit_hit = False
+        self._limit_resets: float | None = None
         self.claude = claude
         self.session_id = session_id
         self.append_prompt = append_prompt or MAC_PROMPT.format(hermes_cmd=celal_command())
@@ -208,6 +240,7 @@ class MacClaudeBrain(Brain):
         kwargs = dict(
             cwd=self.cwd,
             model=self.model,
+            fallback_model=(self.fallback_model if self.fallback_model != self.model else None),
             permission_mode="bypassPermissions",
             include_partial_messages=True,
             system_prompt={"type": "preset", "preset": "claude_code", "append": self.append_prompt},
@@ -237,26 +270,56 @@ class MacClaudeBrain(Brain):
         await client.connect()
         self._client = client
         self._inbox = _Inbox()
-        self._reader = asyncio.create_task(self._read(client), name="claude-reader")
+        self._reader = asyncio.create_task(self._read(client, self._inbox), name="claude-reader")
 
-    async def _read(self, client) -> None:
+    async def _read(self, client, inbox: "_Inbox") -> None:
+        # The reader writes only to its own inbox: a closed client's late EOF must not
+        # reach the inbox of the client that replaced it (fallback switch, Durdur + new message).
         try:
             async for msg in client.receive_messages():
-                self._inbox.put(msg)
+                inbox.put(msg)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
-            self._inbox.put(e)
+            inbox.put(e)
         finally:
-            self._inbox.put(_EOF)
+            inbox.put(_EOF)
 
     async def warm(self) -> None:
         await self._connect()
 
     async def turn(self, text: str | None, emit: Emit) -> TurnOutcome:
-        """Answer ``text``; with ``None`` read an unprompted answer already waiting in the inbox."""
+        """Answer ``text``; with ``None`` read an unprompted answer already waiting in the inbox.
+
+        If the main model's usage limit is full, switch this tab (and new tabs) to the
+        fallback model and ask again once.
+        """
+        if self.model != self.fallback_model and self.fallback_model and _limit_blocked(self.model):
+            await self._switch_to_fallback(emit)
+        outcome = await self._turn_once(text, emit)
+        if (
+            self._limit_hit
+            and text is not None
+            and self.fallback_model
+            and self.model != self.fallback_model
+            and not outcome.interrupted
+        ):
+            _block_model(self.model, self._limit_resets)
+            await self._switch_to_fallback(emit)
+            outcome = await self._turn_once(text, emit)
+        return outcome
+
+    async def _switch_to_fallback(self, emit: Emit) -> None:
+        old = self.model
+        await self.close()
+        self.model = self.fallback_model
+        self._said_model = False
+        emit("progress", f"{old} limiti dolu, {self.model} ile devam ediyorum")
+
+    async def _turn_once(self, text: str | None, emit: Emit) -> TurnOutcome:
         from claude_agent_sdk import (
             AssistantMessage,
+            RateLimitEvent,
             ResultMessage,
             StreamEvent,
             SystemMessage,
@@ -269,6 +332,8 @@ class MacClaudeBrain(Brain):
 
         await self._connect()
         self._aborting = False
+        self._limit_hit = False
+        self._limit_resets = None
         self._inbox.drop_aborts()  # a Durdur that came after the previous turn had already ended
         if text is not None:
             await self._client.query(text)
@@ -305,9 +370,20 @@ class MacClaudeBrain(Brain):
                     if delta.get("type") == "text_delta" and delta.get("text"):
                         streamed += len(delta["text"])
                         emit("text", delta["text"])
+            elif isinstance(msg, RateLimitEvent):
+                info = msg.rate_limit_info
+                if info.status == "rejected":
+                    self._limit_hit = True
+                    self._limit_resets = info.resets_at
             elif isinstance(msg, AssistantMessage):
                 if msg.parent_tool_use_id is not None:
                     continue
+                if msg.error == "rate_limit" or (
+                    msg.error and looks_like_limit(" ".join(getattr(b, "text", "") or "" for b in msg.content))
+                ):
+                    self._limit_hit = True
+                    streamed = 0
+                    continue  # do not read the limit notice aloud
                 for block in msg.content:
                     if isinstance(block, ToolUseBlock):
                         emit("progress", describe_tool(block.name, block.input))
@@ -346,6 +422,10 @@ class MacClaudeBrain(Brain):
                     followup = False
                 result = msg.result if isinstance(msg.result, str) else ""
                 result_text = (result_text + "\n\n" + result).strip() if outcome is not None else result
+                if msg.is_error and not aborted and looks_like_limit(
+                    result or "; ".join(msg.errors or []), msg.api_error_status
+                ):
+                    self._limit_hit = True
                 if msg.is_error and not aborted:
                     err = result or "; ".join(msg.errors or []) or msg.subtype
                     outcome = TurnOutcome(False, result_text, error=str(err)[:300], session_id=self.session_id)
@@ -439,6 +519,7 @@ def make_brain_factory(settings, hermes_client, ensure_connected=None, env: Mapp
         return MacClaudeBrain(
             cwd=tab.cwd or settings.mac_cwd,
             model=settings.mac_model,
+            fallback_model=settings.mac_fallback_model,
             claude=settings.mac_claude,
             session_id=tab.session_id,
         )

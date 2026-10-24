@@ -85,7 +85,8 @@ api = "responses"        # sohbet sunucuda tutulur; "chat" = /v1/chat/completion
 hotkey = "ctrl+space"    # mikrofon aç/kapat; "off" kapatır
 
 [mac]                    # varsayılan beyin: Mac'teki Claude Code (hepsi isteğe bağlı, değerler varsayılan)
-model = "sonnet"         # hız için; "opus" da yazılabilir
+model = "fable"          # varsayılan; "sonnet" daha hızlı
+fallback_model = "opus"  # Fable limiti dolunca bu cevaplar
 cwd = "~"                # yeni sekmelerin çalışma klasörü
 claude = "claude"        # ya da tam yol; PATH'e ek olarak ~/.local/bin aranır
 timeout = 1800           # bir cevap için en çok saniye
