@@ -245,9 +245,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from celal.paths import ModelDiskMissing, configure_model_storage
 
-    # Whisper (mic) and --bench need the model disk. Without it the window and
-    # --text still work: typing only, spoken with the chosen voice (voices are
-    # on the Mac's disk; Whisper is never downloaded there).
+    # Models default to the Mac's disk (celal.paths). Only a CELAL_MODELS_DIR
+    # pointing at an unplugged disk fails; then the window and --text still
+    # work: typing only, spoken with the chosen voice.
     disk_missing: str | None = None
     try:
         configure_model_storage()
@@ -285,8 +285,8 @@ def main(argv: list[str] | None = None) -> int:
 
         notice = None
         if disk_missing:
-            notice = ("Model diski takılı değil: mikrofon kapalı, yalnız yazı. Cevapları seçili ses okumaya devam ediyor. "
-                      "Diski takıp Celal'i yeniden açınca mikrofon geri gelir.")
+            notice = ("CELAL_MODELS_DIR'daki disk takılı değil: mikrofon kapalı, yalnız yazı. Cevapları seçili ses "
+                      "okumaya devam ediyor. Diski takıp ya da CELAL_MODELS_DIR'ı kaldırıp Celal'i yeniden aç.")
         return run_window(settings, cfg, debug=args.debug, menubar=not args.no_menubar,
                           voice=disk_missing is None, notice=notice)
     except KeyboardInterrupt:

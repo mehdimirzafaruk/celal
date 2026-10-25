@@ -4,6 +4,14 @@ from celal.config import load_settings
 from celal.paths import ModelDiskMissing, configure_model_storage
 
 
+def test_default_models_dir_is_on_the_mac_and_created(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    env = {}
+    root = configure_model_storage(env)
+    assert root == tmp_path / ".local" / "share" / "celal" / "models"
+    assert (root / "huggingface" / "hub").is_dir() and "KIOXIA" not in env["HF_HUB_CACHE"]
+
+
 def test_missing_model_disk_is_a_clear_turkish_error(tmp_path):
     env = {"CELAL_MODELS_DIR": str(tmp_path / "KIOXIA" / "Modeller")}
     with pytest.raises(ModelDiskMissing, match="model diski takılı değil"):

@@ -41,7 +41,7 @@ için `--no-wake`.
 ## Kurulum
 
 Gereken: Apple Silicon Mac, Python 3.12 (uv kurar), [uv](https://docs.astral.sh/uv/),
-sunucuya SSH erişimi, Hermes API anahtarı, model diski.
+sunucuya SSH erişimi, Hermes API anahtarı, Mac'te ~8 GB boş yer (Whisper + bütün sesler).
 
 ```bash
 git clone <repo> celal && cd celal
@@ -50,20 +50,17 @@ uv sync
 uv run pytest                 # mock'larla, model indirmez, ağa çıkmaz
 ```
 
-### 1. Model diski
+### 1. Modeller
 
-Whisper (MLX) ağırlıkları ve önbellekleri (Hugging Face hub, torch)
-`CELAL_MODELS_DIR` altında durur; varsayılan `/Volumes/KIOXIA/Modeller`. Celal `HF_HOME`,
-`HF_HUB_CACHE`, `XDG_CACHE_HOME`, `TORCH_HOME` değişkenlerini oraya yönlendirir.
-Klasör yoksa Celal açılmaz ve şunu yazar:
+Whisper (MLX) ağırlıkları ve önbellekleri (Hugging Face hub, torch) Mac'in kendi diskinde,
+`CELAL_MODELS_DIR` altında durur; varsayılan `~/.local/share/celal/models` (ilk açılışta oluşur).
+Celal `HF_HOME`, `HF_HUB_CACHE`, `XDG_CACHE_HOME`, `TORCH_HOME` değişkenlerini oraya yönlendirir.
+Harici disk gerekmez; mikrofon her zaman çalışır.
 
-```
-hata: model diski takılı değil: /Volumes/KIOXIA/Modeller bulunamadı. ...
-```
+`CELAL_MODELS_DIR` elle harici bir diske verilmişse ve disk takılı değilse Celal mikrofonsuz açılır
+(yalnız yazı, seçili ses okur; `--mic` ve `--bench` hata verir). Modeller başka yere sessizce indirilmez.
 
-Whisper iç diske sessizce indirilmez. (Mikrofonsuz `--text` Whisper istemez, disk olmadan da
-çalışır; `--mic` Whisper'a ihtiyaç duyduğu için diski ister.)
-İlk çalıştırmada eksik modeller iner: Whisper turbo ~1,6 GB model diskine, EMA Lightning ~34 MB Mac'in diskine (1b).
+İlk çalıştırmada eksik modeller iner: Whisper turbo ~1,6 GB, EMA Lightning ~34 MB (1b).
 Smart Turn v3 ve Silero Pipecat paketinin içinde gelir.
 
 ### 1b. Sesler
@@ -71,9 +68,8 @@ Smart Turn v3 ve Silero Pipecat paketinin içinde gelir.
 Pencerenin sağ üstündeki menüden ses seçilir; seçim `~/.config/celal/voice.json`'da kalır,
 Celal yeniden açılınca aynı sesle başlar. Yeni ses yüklenince Celal kısa bir cümle söyler.
 
-**Sesler model diskinde değil, Mac'in kendi diskinde durur:** `CELAL_VOICES_DIR`
-(varsayılan `~/.local/share/celal/voices`, hepsi kurulunca ~5,4 GB). Model diski takılı değilken
-de seçili ses konuşur; yalnız mikrofon (Whisper) diski ister.
+**Sesler de Mac'in kendi diskinde durur:** `CELAL_VOICES_DIR`
+(varsayılan `~/.local/share/celal/voices`, hepsi kurulunca ~5,4 GB).
 
 Ölçüm (25 Ekim 2026, M2 16 GB, 5 cümle; ilk ses = cümlenin ilk sesi hazır olana kadar):
 
@@ -215,7 +211,7 @@ Bayraklar:
 | `--barge-in` | Celal konuşurken araya girince sussun (kulaklık gerekir) |
 | `--min-words N` | `--barge-in` ile: N kelimeden sonra sus (0: sesini duyunca) |
 | `--tts <ses>` | ses: `ema`, `ema-tts`, `kitten-haber`, `kitten-balikci`, `kitten-babaanne`, `say` (varsayılan: pencerede son seçilen) |
-| `--install-voice kitten\|ema-tts` | ek ses motorunu model diskine kur |
+| `--install-voice kitten\|ema-tts` | ek ses motorunu Mac'in diskine kur |
 | `--stt turbo\|turbo-q4` | Whisper modeli |
 | `--out dosya.wav` | çalınan sesi WAV'a da yaz |
 | `--no-play` | hoparlöre çalma |
@@ -295,7 +291,7 @@ uv run celal hermes "sunucudaki hermes cron listesini ver"
 
 Hermes API'sine (model `celal`, sohbet `<conversation>-claude`) tek istek atar, cevabı akarken stdout'a
 yazar; hata stderr'e, çıkış kodu 1/2. Tünel açık değilse geçici bir `ssh -L` açar, iş bitince kapatır.
-Model diski gerekmez. Mac'teki Claude sunucu işini bununla devreder; Hermes'e "işi Mac'e geri gönderme"
+Model gerekmez. Mac'teki Claude sunucu işini bununla devreder; Hermes'e "işi Mac'e geri gönderme"
 denir.
 
 **Güvenlik:** Mac'teki Claude izin sormadan çalışır (`bypassPermissions`): dosya silebilir, komut
