@@ -54,7 +54,6 @@ STT_MODELS = {
 @dataclass
 class Config:
     tts: str = "ema"  # a voice id from celal.voices.VOICES
-    disk: bool = True  # model disk present (otherwise only the macOS voice)
     stt: str = "turbo"
     # 0: TTS stops as soon as VAD hears the user (needs headphones; no echo
     # cancellation). N >= 1: only after N transcribed words (speaker-friendly).
@@ -77,7 +76,7 @@ class Config:
 
 def make_tts(cfg: Config) -> SwitchableTTSService:
     on_sentence = (lambda s: cfg.printer(f"[ses] {s}")) if cfg.print_sentences else None  # noqa: E731
-    return SwitchableTTSService(voice=cfg.tts, sample_rate=OUT_RATE, disk=cfg.disk, on_sentence=on_sentence)
+    return SwitchableTTSService(voice=cfg.tts, sample_rate=OUT_RATE, on_sentence=on_sentence)
 
 
 def make_stt(cfg: Config) -> WhisperSTTServiceMLX:

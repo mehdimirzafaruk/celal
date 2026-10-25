@@ -11,7 +11,7 @@ from pipecat.tests.utils import SleepFrame, run_test
 
 from celal import voice_worker
 from celal.tts_switch import SwitchableTTSService, WorkerEngine, WorkerError, turkish_normalizer
-from celal.voices import BY_ID, VOICES, is_available, load_choice, save_choice, worker_python
+from celal.voices import BY_ID, VOICES, is_available, load_choice, save_choice, voices_dir, voices_env, worker_python
 
 # A worker that speaks the protocol without a model: N samples of value v per request.
 FAKE_WORKER = textwrap.dedent('''
@@ -53,7 +53,7 @@ class FakeEngine:
 
 @pytest.fixture
 def models(tmp_path, monkeypatch):
-    monkeypatch.setenv("CELAL_MODELS_DIR", str(tmp_path))
+    monkeypatch.setenv("CELAL_VOICES_DIR", str(tmp_path))
     return tmp_path
 
 
@@ -71,10 +71,8 @@ def test_registry_ids_unique_and_default_present():
         "TurkishNewsAnchor", "TurkishFisherman", "TurkishGrandmaCooking"}
 
 
-def test_availability_follows_disk_and_venv(models):
-    assert is_available(BY_ID["say"], disk=False)
-    assert not is_available(BY_ID["ema"], disk=False)
-    assert is_available(BY_ID["ema"])
+def test_availability_follows_venv(models):
+    assert is_available(BY_ID["say"]) and is_available(BY_ID["ema"])
     assert not is_available(BY_ID["kitten-haber"])
     fake_venv(models, "kitten")
     assert is_available(BY_ID["kitten-balikci"])
@@ -91,8 +89,14 @@ def test_choice_roundtrip_and_unknown_ignored(tmp_path):
 def test_unavailable_start_voice_falls_back(models):
     tts = SwitchableTTSService(voice="kitten-haber")
     assert tts.voice_id == "ema"
-    tts = SwitchableTTSService(voice="ema", disk=False)
-    assert tts.voice_id == "say"
+
+
+def test_voices_live_on_the_mac_disk(models, monkeypatch):
+    monkeypatch.delenv("CELAL_VOICES_DIR")
+    assert str(voices_dir()).startswith(os.path.expanduser("~/"))
+    assert "KIOXIA" not in str(worker_python("kitten"))
+    env = voices_env({"CELAL_VOICES_DIR": "/tmp/v"})
+    assert env["HF_HUB_CACHE"] == "/tmp/v/huggingface/hub" and env["XDG_CACHE_HOME"] == "/tmp/v/cache"
 
 
 async def test_select_switches_and_closes_left_worker(models):

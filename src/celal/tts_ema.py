@@ -106,9 +106,17 @@ class EMALightningTTSService(TTSService):
 
     @staticmethod
     def load_engine(device: str = "cpu") -> Any:
-        from ema_lightning import EMA
+        """EMA with its weights in the voices dir on the Mac's disk (see :mod:`celal.voices`)."""
+        import functools
 
-        return EMA(device=device)
+        import ema_lightning.api as ema_api
+        from huggingface_hub import hf_hub_download
+
+        from celal.voices import hub_dir
+
+        # EMA takes no cache_dir; Whisper in the same process keeps the global HF cache.
+        ema_api.hf_hub_download = functools.partial(hf_hub_download, cache_dir=str(hub_dir()))
+        return ema_api.EMA(device=device)
 
     def _ensure_engine(self) -> Any:
         if self._engine is None:

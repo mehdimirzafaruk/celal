@@ -7,7 +7,10 @@ Engines:
 * ``kitten-*`` KittenTTS 2 (1.7B, MLX), three Turkish speakers, one shared worker
 * ``say``      macOS Yelda, no install
 
-Worker engines live in their own venv under ``<models>/venvs/<worker>``
+Voice models and worker venvs live on the Mac's own disk, never on the
+external model disk: ``CELAL_VOICES_DIR`` (default ``~/.local/share/celal/voices``),
+so Celal speaks with the chosen voice even when that disk is unplugged.
+Worker engines have their own venv under ``<voices>/venvs/<worker>``
 (``celal --install-voice kitten``); see :mod:`celal.voice_worker`. The choice
 is remembered in ``<state_dir>/voice.json``. This module stays light (no
 Pipecat import) so the CLI can read it before the model disk is configured;
@@ -20,15 +23,15 @@ import json
 import os
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from loguru import logger
 
-from celal.paths import models_dir
-
 DEFAULT_VOICE = "ema"
+DEFAULT_VOICES_DIR = "~/.local/share/celal/voices"
+MIN_FREE_GB = 15  # leave the Mac's disk this much room after an install
 
 
 @dataclass(frozen=True)
@@ -57,27 +60,45 @@ WORKER_PACKAGES: dict[str, list[str]] = {
 }
 
 
-# ---- worker venvs ---------------------------------------------------------
-def venv_dir(worker: str, env: dict | None = None) -> Path:
-    return models_dir(env) / "venvs" / worker
+# ---- where voices live ----------------------------------------------------
+def voices_dir(env: Mapping[str, str] | None = None) -> Path:
+    env = os.environ if env is None else env
+    return Path(env.get("CELAL_VOICES_DIR") or DEFAULT_VOICES_DIR).expanduser()
 
 
-def worker_python(worker: str, env: dict | None = None) -> Path:
+def hub_dir(env: Mapping[str, str] | None = None) -> Path:
+    """Hugging Face cache for voice models (Whisper's stays on the model disk)."""
+    return voices_dir(env) / "huggingface" / "hub"
+
+
+def voices_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Cache variables for a worker process: every download goes under the voices dir."""
+    root = voices_dir(env)
+    return {
+        "HF_HOME": str(root / "huggingface"),
+        "HF_HUB_CACHE": str(hub_dir(env)),
+        "HF_XET_CACHE": str(root / "huggingface" / "xet"),
+        "XDG_CACHE_HOME": str(root / "cache"),
+        "TORCH_HOME": str(root / "torch"),
+    }
+
+
+def venv_dir(worker: str, env: Mapping[str, str] | None = None) -> Path:
+    return voices_dir(env) / "venvs" / worker
+
+
+def worker_python(worker: str, env: Mapping[str, str] | None = None) -> Path:
     return venv_dir(worker, env) / "bin" / "python"
 
 
-def is_available(voice: Voice, disk: bool = True) -> bool:
-    if voice.engine == "say":
-        return True
-    if not disk:
-        return False
-    if voice.engine == "ema":
+def is_available(voice: Voice) -> bool:
+    if voice.engine in ("say", "ema"):
         return True
     return worker_python(voice.engine).exists()
 
 
 def install_worker(worker: str, printer: Callable[[str], None] = print) -> int:
-    """Create ``<models>/venvs/<worker>`` and install its packages with uv."""
+    """Create ``<voices>/venvs/<worker>`` and install its packages with uv."""
     if worker not in WORKER_PACKAGES:
         printer(f"bilinmeyen ses motoru: {worker} (seçenekler: {', '.join(WORKER_PACKAGES)})")
         return 2
@@ -87,7 +108,12 @@ def install_worker(worker: str, printer: Callable[[str], None] = print) -> int:
         return 2
     target = venv_dir(worker)
     target.parent.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, UV_LINK_MODE="copy")  # the venv is on another disk than uv's cache
+    free_gb = shutil.disk_usage(target.parent).free / 1e9
+    if free_gb < MIN_FREE_GB:
+        printer(f"diskte {free_gb:.0f} GB boş; kurulum için en az {MIN_FREE_GB} GB gerekir")
+        return 2
+    env = dict(os.environ)
+    env.pop("XDG_CACHE_HOME", None)  # uv's own cache stays in ~/.cache/uv
     steps = [
         [uv, "venv", "--python", "3.12", "--allow-existing", str(target)],
         [uv, "pip", "install", "--python", str(target / "bin" / "python"), *WORKER_PACKAGES[worker]],

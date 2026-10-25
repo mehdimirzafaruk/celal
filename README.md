@@ -52,7 +52,7 @@ uv run pytest                 # mock'larla, model indirmez, ağa çıkmaz
 
 ### 1. Model diski
 
-Bütün model ağırlıkları ve önbellekler (Whisper MLX, EMA Lightning, Hugging Face hub, torch)
+Whisper (MLX) ağırlıkları ve önbellekleri (Hugging Face hub, torch)
 `CELAL_MODELS_DIR` altında durur; varsayılan `/Volumes/KIOXIA/Modeller`. Celal `HF_HOME`,
 `HF_HUB_CACHE`, `XDG_CACHE_HOME`, `TORCH_HOME` değişkenlerini oraya yönlendirir.
 Klasör yoksa Celal açılmaz ve şunu yazar:
@@ -61,9 +61,9 @@ Klasör yoksa Celal açılmaz ve şunu yazar:
 hata: model diski takılı değil: /Volumes/KIOXIA/Modeller bulunamadı. ...
 ```
 
-İç diske sessizce bir şey indirilmez. (Mikrofonsuz `--text --tts say` model istemez, disk olmadan da
+Whisper iç diske sessizce indirilmez. (Mikrofonsuz `--text` Whisper istemez, disk olmadan da
 çalışır; `--mic` Whisper'a ihtiyaç duyduğu için diski ister.)
-İlk çalıştırmada eksik modeller diske iner: Whisper turbo ~1,6 GB, EMA Lightning ~34 MB.
+İlk çalıştırmada eksik modeller iner: Whisper turbo ~1,6 GB model diskine, EMA Lightning ~34 MB Mac'in diskine (1b).
 Smart Turn v3 ve Silero Pipecat paketinin içinde gelir.
 
 ### 1b. Sesler
@@ -71,18 +71,25 @@ Smart Turn v3 ve Silero Pipecat paketinin içinde gelir.
 Pencerenin sağ üstündeki menüden ses seçilir; seçim `~/.config/celal/voice.json`'da kalır,
 Celal yeniden açılınca aynı sesle başlar. Yeni ses yüklenince Celal kısa bir cümle söyler.
 
-| Ses | Motor | Nerede çalışır |
-|---|---|---|
-| EMA Lightning | 8,6M, yalnız Türkçe, en yeni EMA (1.1.2) | Celal'in içinde, CPU |
-| EMA-TTS (büyük) | 65M, EMA'nın büyük kardeşi, 48 kHz | ayrı süreç, `--install-voice ema-tts` |
-| Kitten · Haber spikeri / Balıkçı / Babaanne | KittenTTS 2, 1.7B, MLX | ayrı süreç, `--install-voice kitten` |
-| Mac · Yelda | macOS `say` | kurulum yok, disk gerekmez |
+**Sesler model diskinde değil, Mac'in kendi diskinde durur:** `CELAL_VOICES_DIR`
+(varsayılan `~/.local/share/celal/voices`, hepsi kurulunca ~5,4 GB). Model diski takılı değilken
+de seçili ses konuşur; yalnız mikrofon (Whisper) diski ister.
+
+Ölçüm (25 Ekim 2026, M2 16 GB, 5 cümle; ilk ses = cümlenin ilk sesi hazır olana kadar):
+
+| Ses | Motor | İlk ses | Hız (üretim/ses süresi) | Not |
+|---|---|---|---|---|
+| EMA Lightning (varsayılan) | 8,6M, yalnız Türkçe, EMA'nın en yenisi (1.1.2) | 0,07 s | 0,06 | hatasız |
+| EMA-TTS (büyük) | 65M, EMA'nın büyük kardeşi, 48 kHz | 1,1 s | 0,36 | "toplantın" → "toplantım", "ara" → "arayın" |
+| Kitten · Haber spikeri / Balıkçı / Babaanne | KittenTTS 2, 1.7B, MLX | ~5 s | ~1,2 | konuşmadan yavaş üretir: cümle aralarında bekleme olur; "README"yi bozabilir |
+| Mac · Yelda | macOS `say` | ~0,5 s | — | robotik, kurulum yok |
 
 KittenTTS 2 ve EMA-TTS'in bağımlılıkları büyük (transformers, voxcpm …); Pipecat ile aynı
-venv'e girmesinler diye her biri `CELAL_MODELS_DIR/venvs/<motor>` altında kendi venv'inde,
+venv'e girmesinler diye her biri `CELAL_VOICES_DIR/venvs/<motor>` altında kendi venv'inde,
 `src/celal/voice_worker.py` süreci olarak çalışır. Başka sese geçince süreç kapanır, belleği boşalır.
-Süreç günlüğü: `CELAL_MODELS_DIR/venvs/<motor>.log`. Kitten'e giden metin önce EMA'nın Türkçe
+Süreç günlüğü: `CELAL_VOICES_DIR/venvs/<motor>.log`. Kitten'e giden metin önce EMA'nın Türkçe
 normalleştiricisinden geçer (sayı, tarih, para okunuşu); Kitten'in kendi normalleştiricisi İngilizce.
+Kurulum Mac diskinde en az 15 GB boş yer bırakmıyorsa reddedilir.
 
 ```bash
 uv run celal --install-voice kitten

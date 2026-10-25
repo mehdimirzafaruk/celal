@@ -23,10 +23,9 @@ from pipecat.frames.frames import ErrorFrame, Frame, TTSAudioRawFrame
 from pipecat.services.settings import TTSSettings
 from pipecat.services.tts_service import TTSService
 
-from celal.paths import models_dir
 from celal.tts_ema import EMALightningTTSService, float_to_int16_bytes, iterate_in_thread
 from celal.tts_say import CHUNK_SECONDS, say_to_pcm
-from celal.voices import BY_ID, DEFAULT_VOICE, VOICES, WORKER_PACKAGES, is_available, worker_python
+from celal.voices import BY_ID, DEFAULT_VOICE, VOICES, WORKER_PACKAGES, is_available, voices_dir, voices_env, worker_python
 
 
 class EmaEngine:
@@ -99,7 +98,7 @@ class WorkerEngine:
         return kind, payload
 
     def _log_path(self) -> Path:
-        return models_dir() / "venvs" / f"{self.worker}.log"
+        return voices_dir() / "venvs" / f"{self.worker}.log"
 
     def load(self) -> None:
         with self._lock:
@@ -115,7 +114,7 @@ class WorkerEngine:
         logger.info(f"ses motoru başlıyor: {self.worker}")
         self._proc = subprocess.Popen(
             [str(python), "-u", str(self.script), self.worker],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, env=dict(os.environ),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, env={**os.environ, **voices_env()},
         )
         log.close()
         kind, payload = self._read_frame()
@@ -204,7 +203,6 @@ class SwitchableTTSService(TTSService):
         *,
         voice: str = DEFAULT_VOICE,
         sample_rate: int = 24000,
-        disk: bool = True,
         on_sentence: Callable[[str], None] | None = None,
         engines: dict[str, Any] | None = None,
         **kwargs,
@@ -217,11 +215,10 @@ class SwitchableTTSService(TTSService):
             **kwargs,
         )
         self._rate = sample_rate
-        self._disk = disk
         self._on_sentence = on_sentence
         self._engines: dict[str, Any] = dict(engines or {})
-        if voice not in BY_ID or not is_available(BY_ID[voice], disk):
-            voice = DEFAULT_VOICE if is_available(BY_ID[DEFAULT_VOICE], disk) else "say"
+        if voice not in BY_ID or not is_available(BY_ID[voice]):
+            voice = DEFAULT_VOICE
         self.voice_id = voice
 
     # engines are created on first use and the worker ones closed when left
@@ -238,14 +235,14 @@ class SwitchableTTSService(TTSService):
         return engine
 
     def voices(self) -> list[dict]:
-        return [{"id": v.id, "label": v.label, "available": is_available(v, self._disk)} for v in VOICES]
+        return [{"id": v.id, "label": v.label, "available": is_available(v)} for v in VOICES]
 
     async def select(self, voice_id: str) -> None:
         """Switch voice and load it (raises if it cannot load; the old voice stays)."""
         voice = BY_ID.get(voice_id)
         if voice is None:
             raise ValueError(f"bilinmeyen ses: {voice_id}")
-        if not is_available(voice, self._disk):
+        if not is_available(voice):
             hint = f" (celal --install-voice {voice.engine})" if voice.engine in WORKER_PACKAGES else ""
             raise WorkerError(f"{voice.label} kurulu değil{hint}")
         await asyncio.to_thread(self._engine(voice.engine).load)

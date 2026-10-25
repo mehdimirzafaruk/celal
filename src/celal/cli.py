@@ -213,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tts", choices=[v.id for v in VOICES], default=None,
                         help="ses (varsayılan: pencerede son seçilen, yoksa ema)")
     parser.add_argument("--install-voice", choices=list(WORKER_PACKAGES),
-                        help="ek ses motorunu model diskine kur (kitten: KittenTTS 2, ema-tts: büyük EMA)")
+                        help="ek ses motorunu Mac'in diskine kur (kitten: KittenTTS 2, ema-tts: büyük EMA)")
     parser.add_argument("--stt", choices=["turbo", "turbo-q4"], default="turbo", help="Whisper modeli")
     parser.add_argument(
         "--barge-in",
@@ -238,11 +238,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     _setup_logging(args.log)
 
+    if args.install_voice:  # voices live on the Mac's disk, the model disk is not needed
+        from celal.voices import install_worker
+
+        return install_worker(args.install_voice)
+
     from celal.paths import ModelDiskMissing, configure_model_storage
 
     # Whisper (mic) and --bench need the model disk. Without it the window and
-    # --text still work: typing only, spoken with macOS `say` (no download to
-    # the internal disk).
+    # --text still work: typing only, spoken with the chosen voice (voices are
+    # on the Mac's disk; Whisper is never downloaded there).
     disk_missing: str | None = None
     try:
         configure_model_storage()
@@ -251,15 +256,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"hata: {e}", file=sys.stderr)
             return 2
         disk_missing = str(e)
-        if args.install_voice:
-            print(f"hata: {e}", file=sys.stderr)
-            return 2
-        print(f"uyarı: {e} Ses kapalı, yalnız yazı; okuma macOS sesiyle.", file=sys.stderr)
-
-    if args.install_voice:
-        from celal.voices import install_worker
-
-        return install_worker(args.install_voice)
+        print(f"uyarı: {e} Mikrofon kapalı, yalnız yazı.", file=sys.stderr)
 
     if args.bench:
         from celal.bench import run_bench
@@ -273,7 +270,6 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_settings()
     cfg = Config(
         tts=args.tts or load_choice(settings.state_dir) or DEFAULT_VOICE,
-        disk=disk_missing is None,
         stt=args.stt,
         min_words=args.min_words,
         barge_in=args.barge_in,
@@ -289,8 +285,8 @@ def main(argv: list[str] | None = None) -> int:
 
         notice = None
         if disk_missing:
-            notice = ("Model diski takılı değil: mikrofon kapalı, yalnız yazı. Cevapları Mac'in kendi sesi okuyor. "
-                      "Diski takıp Celal'i yeniden açınca ses geri gelir.")
+            notice = ("Model diski takılı değil: mikrofon kapalı, yalnız yazı. Cevapları seçili ses okumaya devam ediyor. "
+                      "Diski takıp Celal'i yeniden açınca mikrofon geri gelir.")
         return run_window(settings, cfg, debug=args.debug, menubar=not args.no_menubar,
                           voice=disk_missing is None, notice=notice)
     except KeyboardInterrupt:
