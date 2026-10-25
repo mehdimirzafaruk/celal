@@ -56,6 +56,7 @@ from celal.mac_api import MacApiServer, ensure_token
 from celal.mac_task import HERMES, MAC_FORCED, NEW, route, same_dir, spoken_summary, split_cwd
 from celal.pipeline import STT_MODELS, Built, Config, build_text, build_voice
 from celal.speech_text import SentenceBuffer
+from celal.voices import BY_ID, save_choice
 from celal.tabs import MAC, QUEUED, RUNNING, Tab, TabManager, make_label
 from celal.tunnel import EXTERNAL, OPEN, ReverseTunnel, TunnelManager
 from celal.wake import START_PHRASE, STOP_PHRASE, ListenState
@@ -173,6 +174,7 @@ class CelalCore:
             on_event=self._on_tab,
         )
         self._speech: _Speech | None = None
+        self._voice_loading: str | None = None
         self._timing_pending: _Speech | None = None
         self.timings: list[dict] = []  # per answer: first_text / first_audio / total seconds
         self.mac_api_enabled = settings.mac_api if mac_api is None else mac_api
@@ -202,6 +204,7 @@ class CelalCore:
             "mic": self.mic,
             "voice": self.voice,
             "wake": {"on": self.cfg.wake, "active": self.listen.active, "start": START_PHRASE, "stop": STOP_PHRASE},
+            "tts": self._tts_view(),
             "conversation": self.client.conversation,
             "tabs": self.tabs.views(),
             "active": self.tabs.active_id,
@@ -213,6 +216,12 @@ class CelalCore:
                 "reverse": (f"{self.reverse.status}" if self.reverse is not None else "kapalı"),
             },
         }
+
+    def _tts_view(self) -> dict | None:
+        tts = self.built.tts if self.built else None
+        if tts is None or not hasattr(tts, "voices"):
+            return None
+        return {"id": tts.voice_id, "voices": tts.voices(), "loading": self._voice_loading}
 
     def history(self) -> list[dict]:
         """Every tab's stored lines, for a page that (re)loads."""
@@ -642,6 +651,28 @@ class CelalCore:
             await self.client.aclose()
 
     # ---- actions ------------------------------------------------------
+    async def set_voice(self, voice_id: str) -> None:
+        """Switch the speaking voice (window menu); loading a big model takes a while."""
+        tts = self.built.tts if self.built else None
+        if tts is None or voice_id == tts.voice_id or self._voice_loading:
+            self._refresh()
+            return
+        voice = BY_ID.get(voice_id)
+        label = voice.label if voice else voice_id
+        self._voice_loading = voice_id
+        self._refresh()
+        try:
+            await tts.select(voice_id)
+        except Exception as e:  # noqa: BLE001
+            self.emit({"type": "error", "text": f"{label} açılamadı: {e}"})
+        else:
+            save_choice(self.settings.state_dir, voice_id)
+            self.emit({"type": "info", "text": f"Ses: {label}"})
+            self._queue_tts("Merhaba, artık bu sesle konuşuyorum.")
+        finally:
+            self._voice_loading = None
+            self._refresh()
+
     async def set_mic(self, on: bool) -> None:
         if not self.voice or self.built is None:
             self.emit({"type": "error", "text": "Mikrofon bu modda yok."})

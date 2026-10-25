@@ -208,7 +208,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--text", action="store_true", help="terminal modu: stdin'den yazı → Mac Claude / Hermes → ses")
     parser.add_argument("--bench", action="store_true", help="Whisper / TTS / RAM ölçümü")
-    parser.add_argument("--tts", choices=["ema", "say"], default="ema", help="TTS motoru (varsayılan ema)")
+    from celal.voices import VOICES, WORKER_PACKAGES
+
+    parser.add_argument("--tts", choices=[v.id for v in VOICES], default=None,
+                        help="ses (varsayılan: pencerede son seçilen, yoksa ema)")
+    parser.add_argument("--install-voice", choices=list(WORKER_PACKAGES),
+                        help="ek ses motorunu model diskine kur (kitten: KittenTTS 2, ema-tts: büyük EMA)")
     parser.add_argument("--stt", choices=["turbo", "turbo-q4"], default="turbo", help="Whisper modeli")
     parser.add_argument(
         "--barge-in",
@@ -246,21 +251,29 @@ def main(argv: list[str] | None = None) -> int:
             print(f"hata: {e}", file=sys.stderr)
             return 2
         disk_missing = str(e)
-        if args.tts == "ema":
-            args.tts = "say"
+        if args.install_voice:
+            print(f"hata: {e}", file=sys.stderr)
+            return 2
         print(f"uyarı: {e} Ses kapalı, yalnız yazı; okuma macOS sesiyle.", file=sys.stderr)
+
+    if args.install_voice:
+        from celal.voices import install_worker
+
+        return install_worker(args.install_voice)
 
     if args.bench:
         from celal.bench import run_bench
 
-        return run_bench([args.stt], skip_ema=args.tts != "ema")
+        return run_bench([args.stt], skip_ema=args.tts not in (None, "ema"))
 
     from celal.config import load_settings
     from celal.pipeline import Config
+    from celal.voices import DEFAULT_VOICE, load_choice
 
     settings = load_settings()
     cfg = Config(
-        tts=args.tts,
+        tts=args.tts or load_choice(settings.state_dir) or DEFAULT_VOICE,
+        disk=disk_missing is None,
         stt=args.stt,
         min_words=args.min_words,
         barge_in=args.barge_in,

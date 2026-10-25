@@ -39,8 +39,7 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from celal.echo_gate import MicGate, SpeakingWindow, TranscriptGate
 from celal.audio_io import SoundDeviceTransport, SoundDeviceTransportParams
 from celal.stt_filter import WhisperHallucinationFilter
-from celal.tts_ema import EMALightningTTSService
-from celal.tts_say import SayTTSService
+from celal.tts_switch import SwitchableTTSService
 from celal.wake import ListenState, VoiceCommandGate
 
 IN_RATE = 16000
@@ -54,7 +53,8 @@ STT_MODELS = {
 
 @dataclass
 class Config:
-    tts: str = "ema"
+    tts: str = "ema"  # a voice id from celal.voices.VOICES
+    disk: bool = True  # model disk present (otherwise only the macOS voice)
     stt: str = "turbo"
     # 0: TTS stops as soon as VAD hears the user (needs headphones; no echo
     # cancellation). N >= 1: only after N transcribed words (speaker-friendly).
@@ -75,13 +75,9 @@ class Config:
     print_sentences: bool = False
 
 
-def make_tts(cfg: Config) -> EMALightningTTSService | SayTTSService:
+def make_tts(cfg: Config) -> SwitchableTTSService:
     on_sentence = (lambda s: cfg.printer(f"[ses] {s}")) if cfg.print_sentences else None  # noqa: E731
-    if cfg.tts == "ema":
-        return EMALightningTTSService(sample_rate=OUT_RATE, on_sentence=on_sentence)
-    if cfg.tts == "say":
-        return SayTTSService(sample_rate=OUT_RATE, on_sentence=on_sentence)
-    raise ValueError(f"unknown tts: {cfg.tts}")
+    return SwitchableTTSService(voice=cfg.tts, sample_rate=OUT_RATE, disk=cfg.disk, on_sentence=on_sentence)
 
 
 def make_stt(cfg: Config) -> WhisperSTTServiceMLX:
@@ -143,7 +139,7 @@ class TurnSink(FrameProcessor):
 class Built:
     worker: PipelineWorker
     transport: SoundDeviceTransport
-    tts: EMALightningTTSService | SayTTSService
+    tts: SwitchableTTSService
     user_aggregator: object | None = None
     window: SpeakingWindow | None = None
     listen: ListenState | None = None  # voice commands gate (None: always listening)

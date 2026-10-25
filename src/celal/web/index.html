@@ -93,6 +93,11 @@
   button:disabled { opacity: .45; cursor: default; }
   .tools { display: flex; gap: 6px; align-items: center; }
   .tools button { height: 26px; font-size: 12px; padding: 0 9px; }
+  #voice { height: 26px; font: inherit; font-size: 12px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line);
+    background: #20242d; color: var(--text); outline: none; cursor: pointer; }
+  #voice:hover, #voice:focus { border-color: var(--accent); }
+  #voice.loading { color: var(--warn); border-color: var(--warn); }
+  #voice:disabled { opacity: .45; cursor: default; }
   #par { font-size: 11px; color: var(--warn); display: none; } #par.on { display: inline; }
 </style>
 </head>
@@ -101,6 +106,7 @@
   <h1>Celal</h1>
   <span id="conn" class="pill bad" title="Hermes (sunucu) bağlantısı"><span class="dot"></span><span id="conn-text">bağlı değil</span></span>
   <span id="state" class="pill"><span class="dot"></span><span id="state-text">hazır</span></span>
+  <select id="voice" title="Celal'in sesi" disabled><option>ses…</option></select>
 </header>
 <nav id="tabs"></nav>
 <div id="reason">başlıyor…</div>
@@ -212,6 +218,23 @@
     const p = pane(id); if (p) { p.classList.add("active"); p.scrollTop = p.scrollHeight; }
   }
 
+  function renderVoice(t) {
+    const sel = $("voice");
+    if (document.activeElement === sel && !t.loading) return;  // do not reset an open menu
+    sel.innerHTML = "";
+    t.voices.forEach(v => {
+      const o = document.createElement("option"); o.value = v.id;
+      o.textContent = v.label + (v.available ? "" : " (kurulu değil)");
+      o.disabled = !v.available;
+      if (t.loading === v.id) o.textContent = v.label + " — yükleniyor…";
+      sel.appendChild(o);
+    });
+    sel.value = t.loading || t.id;
+    sel.disabled = !!t.loading;
+    sel.classList.toggle("loading", !!t.loading);
+  }
+  $("voice").onchange = (e) => { const v = e.target.value; e.target.blur(); if (api()) api().set_voice(v); };
+
   function status(s) {
     $("conn").className = "pill " + (s.connected ? "ok" : "bad");
     $("conn-text").textContent = "Hermes " + s.conn;
@@ -225,6 +248,7 @@
     $("mic-text").textContent = micOn ? (passive ? "Bekliyor" : "Dinliyor") : "Dinle";
     mic.disabled = !s.voice;
     $("hint").textContent = micHint();
+    if (s.tts) renderVoice(s.tts);
     if (s.tabs) {
       tabsList = s.tabs; tabsList.forEach(t => pane(t.id));
       Object.keys(panes).forEach(k => { if (!tabsList.find(t => t.id === k)) { panes[k].remove(); delete panes[k]; } });

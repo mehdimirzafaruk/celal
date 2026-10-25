@@ -323,3 +323,40 @@ async def test_hermes_down_backs_off_tunnel_restarts(settings, fake_tts):
     await asyncio.sleep(0.1)
     assert core.connected and core.kicks_since_ok == 0
     await core.shutdown()
+
+
+class VoiceTTS(FakeTTS):
+    """FakeTTS with the switchable-voice surface the window uses."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.voice_id = "ema"
+
+    def voices(self):
+        return [{"id": "ema", "label": "EMA Lightning", "available": True},
+                {"id": "kitten-haber", "label": "Kitten · Haber spikeri", "available": True}]
+
+    async def select(self, voice_id):
+        if voice_id == "bozuk":
+            raise RuntimeError("model yok")
+        self.voice_id = voice_id
+
+
+async def test_set_voice_switches_saves_and_speaks(settings, monkeypatch):
+    from celal.voices import load_choice
+
+    tts = {}
+    monkeypatch.setattr(pipeline_mod, "make_tts", lambda cfg: tts.setdefault("obj", VoiceTTS()))
+    events = []
+    core = await make_core(settings, FakeClient(settings), events)
+    assert core.snapshot()["tts"]["id"] == "ema"
+    await core.set_voice("kitten-haber")
+    assert core.snapshot()["tts"] == {"id": "kitten-haber", "voices": tts["obj"].voices(), "loading": None}
+    assert load_choice(settings.state_dir) == "kitten-haber"
+    assert any(e.get("type") == "info" and "Haber spikeri" in e["text"] for e in events)
+    assert await until(lambda: any("bu sesle" in s for s in tts["obj"].spoken), 3)
+    await core.set_voice("bozuk")
+    assert tts["obj"].voice_id == "kitten-haber"
+    assert any(e.get("type") == "error" and "model yok" in e["text"] for e in events)
+    assert load_choice(settings.state_dir) == "kitten-haber"
+    await core.shutdown()

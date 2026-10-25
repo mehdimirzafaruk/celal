@@ -96,6 +96,10 @@ class Api:
         self._core.call(self._core.set_mic(bool(on)))
         return True
 
+    def set_voice(self, voice_id: str):
+        self._core.call(self._core.set_voice(str(voice_id)))
+        return True
+
     def interrupt(self):
         logger.info("Durdur (pencere)")
         self._core.call(self._core.interrupt())

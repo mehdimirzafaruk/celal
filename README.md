@@ -13,7 +13,7 @@ yazı ────────────────────────�
                                  └─ sunucu işi gerekirse: celal hermes "<istek>" → Hermes
                  "sunucuda …" → Hermes API (SSH tüneli, /v1/responses, akış)
                                                                          ▼
-                               EMA Lightning (tr) / say -v Yelda → hoparlör (yalnız aktif sekme)
+                     seçilen ses (EMA Lightning / EMA-TTS / KittenTTS 2 / Yelda) → hoparlör (yalnız aktif sekme)
 Hermes (Telegram) mac_task → ssh -R → Celal'in yerel API'si (127.0.0.1:8643) → yeni 📱 sekme
 ```
 
@@ -65,6 +65,29 @@ hata: model diski takılı değil: /Volumes/KIOXIA/Modeller bulunamadı. ...
 çalışır; `--mic` Whisper'a ihtiyaç duyduğu için diski ister.)
 İlk çalıştırmada eksik modeller diske iner: Whisper turbo ~1,6 GB, EMA Lightning ~34 MB.
 Smart Turn v3 ve Silero Pipecat paketinin içinde gelir.
+
+### 1b. Sesler
+
+Pencerenin sağ üstündeki menüden ses seçilir; seçim `~/.config/celal/voice.json`'da kalır,
+Celal yeniden açılınca aynı sesle başlar. Yeni ses yüklenince Celal kısa bir cümle söyler.
+
+| Ses | Motor | Nerede çalışır |
+|---|---|---|
+| EMA Lightning | 8,6M, yalnız Türkçe, en yeni EMA (1.1.2) | Celal'in içinde, CPU |
+| EMA-TTS (büyük) | 65M, EMA'nın büyük kardeşi, 48 kHz | ayrı süreç, `--install-voice ema-tts` |
+| Kitten · Haber spikeri / Balıkçı / Babaanne | KittenTTS 2, 1.7B, MLX | ayrı süreç, `--install-voice kitten` |
+| Mac · Yelda | macOS `say` | kurulum yok, disk gerekmez |
+
+KittenTTS 2 ve EMA-TTS'in bağımlılıkları büyük (transformers, voxcpm …); Pipecat ile aynı
+venv'e girmesinler diye her biri `CELAL_MODELS_DIR/venvs/<motor>` altında kendi venv'inde,
+`src/celal/voice_worker.py` süreci olarak çalışır. Başka sese geçince süreç kapanır, belleği boşalır.
+Süreç günlüğü: `CELAL_MODELS_DIR/venvs/<motor>.log`. Kitten'e giden metin önce EMA'nın Türkçe
+normalleştiricisinden geçer (sayı, tarih, para okunuşu); Kitten'in kendi normalleştiricisi İngilizce.
+
+```bash
+uv run celal --install-voice kitten
+uv run celal --install-voice ema-tts
+```
 
 ### 2. Sunucu bağlantısı
 
@@ -184,7 +207,8 @@ Bayraklar:
 | `--mic` | mikrofon açık başlasın |
 | `--barge-in` | Celal konuşurken araya girince sussun (kulaklık gerekir) |
 | `--min-words N` | `--barge-in` ile: N kelimeden sonra sus (0: sesini duyunca) |
-| `--tts ema\|say` | TTS motoru (varsayılan `ema`) |
+| `--tts <ses>` | ses: `ema`, `ema-tts`, `kitten-haber`, `kitten-balikci`, `kitten-babaanne`, `say` (varsayılan: pencerede son seçilen) |
+| `--install-voice kitten\|ema-tts` | ek ses motorunu model diskine kur |
 | `--stt turbo\|turbo-q4` | Whisper modeli |
 | `--out dosya.wav` | çalınan sesi WAV'a da yaz |
 | `--no-play` | hoparlöre çalma |
@@ -305,6 +329,8 @@ yere loglanmaz. Bu zinciri genişletme (Hermes'e başka kanal açma, API'yi dı�
 - `src/celal/echo_gate.py`: Celal konuşurken mikrofonu yok sayar; `wake.py`: "Celal dinlemeye başla/durdur".
 - `src/celal/ui.py` + `web/index.html`: pywebview penceresi (sekme şeridi); `menubar.py`: rumps simgesi
   (ayrı süreç); `hotkey.py`: Carbon kısayolu.
+- `src/celal/voices.py`: ses listesi, kurulum, seçimin saklanması; `tts_switch.py`: sesi çalışırken
+  değiştirilebilen TTS servisi; `voice_worker.py`: ağır motorların ayrı süreci.
 - Faz 1'den kalanlar: `audio_io.py`, `tts_ema.py`, `tts_say.py`, `stt_filter.py`, `speech_text.py`, `bench.py`.
 
 ## Bilinen sınırlar
